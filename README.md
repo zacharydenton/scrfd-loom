@@ -120,6 +120,15 @@ keypoints to a fraction of a pixel, not bitwise; the kernels are compiled for 64
 (insightface's default `det_size`) and gfx1151; the model is fetched from
 `~/.insightface/models/buffalo_l/det_10g.onnx`, or `SCRFD_ONNX`.
 
+The preprocessing matters more than the network. `detect()` letterboxes exactly as
+insightface does (`cv2.resize`, bilinear, no antialiasing); a pipeline that resamples
+its own way -- vips with lanczos3, say -- gets detections about 0.97 IoU and two
+pixels per landmark away from that, which is enough to move the face crops and the
+embeddings built on them. If your existing vectors came from your own resampler,
+keep it: `detect_letterboxed(canvases, det_scales)` takes already-letterboxed
+`(640, 640, 3)` uint8 BGR canvases (a stacked array is used in place) and maps the
+results back with the `det_scale` you computed.
+
 ## Running it
 
 Needs the Loom toolchain from hrx-system (`scripts/env.sh` points at the build) and

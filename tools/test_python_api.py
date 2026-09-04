@@ -108,6 +108,26 @@ def main() -> int:
               np.array_equal(first[0], saved[0]) and np.array_equal(first[1], saved[1]))
         check("max_num caps the result", len(model.detect(img, max_num=2)[0]) == 2)
 
+        # A caller's own letterbox: the same canvas must reproduce detect() bitwise,
+        # a stacked array is accepted in place, and det_scales=None means canvas pixels.
+        det_img, s = D.letterbox(img, model.size)
+        (lb_det, lb_kps), = model.detect_letterboxed([det_img], [s])
+        check("detect_letterboxed on insightface's own canvas == detect()",
+              np.array_equal(lb_det, det) and np.array_equal(lb_kps, kps))
+        stacked = np.stack([det_img, D.letterbox(images[1], model.size)[0]])
+        two = model.detect_letterboxed(stacked, [s, D.letterbox(images[1], model.size)[1]])
+        check("stacked canvases through one call match detect_batch",
+              all(np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1]) for a, b in zip(two, results[:2])))
+        (cv_det, cv_kps), = model.detect_letterboxed([det_img])
+        check("det_scales=None returns canvas pixels",
+              np.allclose(cv_det[:, :4], det[:, :4] * s, atol=1e-3) and np.allclose(cv_kps, kps * s, atol=1e-3))
+        area = cv2.resize(img, (det_img.shape[1], int(round(img.shape[0] * det_img.shape[1] / img.shape[1]))), interpolation=cv2.INTER_AREA)
+        canvas = np.zeros_like(det_img); canvas[:area.shape[0]] = area
+        (ar_det, _), = model.detect_letterboxed([canvas], [s])
+        check("a different resampler still finds the faces", len(ar_det) == len(det))
+        require_raises(ValueError, "uint8", lambda: model.detect_letterboxed([det_img.astype(np.float32)]))
+        require_raises(ValueError, "det_scales", lambda: model.detect_letterboxed([det_img], [s, s]))
+
         # The ABI rejects wrong sizes before launching anything.
         error = ctypes.create_string_buffer(1024)
         u8, f32, i32 = (ctypes.POINTER(t) for t in (ctypes.c_uint8, ctypes.c_float, ctypes.c_int32))

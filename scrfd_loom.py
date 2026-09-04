@@ -245,11 +245,45 @@ class SCRFDLoom:
     def detect(self, image_bgr: np.ndarray, max_num: int = 0) -> tuple[np.ndarray, np.ndarray]:
         return self.detect_batch([image_bgr], max_num)[0]
 
+    def detect_letterboxed(self, canvases, det_scales=None, max_num: int = 0) -> list[tuple[np.ndarray, np.ndarray]]:
+        """Images the caller has already letterboxed to ``(size, size, 3)`` uint8 BGR,
+        top-left aligned, with whatever resampler it prefers -- a list of them, or one
+        stacked ``(B, size, size, 3)`` array, which is used in place without a copy.
+
+        ``det_scales`` is one ``new_height / original_height`` per image, the value
+        insightface's letterbox returns, and maps boxes and keypoints back to
+        original-image pixels; ``None`` returns them in canvas pixels. Use this when
+        the rest of a pipeline already resamples its own way: the resampler moves
+        detections a little (a bilinear-vs-lanczos difference is roughly 0.97 IoU and
+        two pixels on a landmark), and matching what produced your existing
+        embeddings matters more than matching insightface.
+        """
+        stacked = np.asarray(canvases)
+        expected = (self.size, self.size, 3)
+        if stacked.ndim != 4 or stacked.shape[1:] != expected or stacked.dtype != np.uint8:
+            raise ValueError(f"expected (B, {self.size}, {self.size}, 3) uint8 BGR canvases, got {stacked.shape} {stacked.dtype}")
+        batch = stacked.shape[0]
+        scales = [1.0] * batch if det_scales is None else [float(v) for v in det_scales]
+        if len(scales) != batch:
+            raise ValueError(f"det_scales has {len(scales)} entries for {batch} canvases")
+        with self._lock:
+            self._ensure_usable()
+            results = []
+            for start in range(0, batch, self.max_batch):
+                chunk = np.ascontiguousarray(stacked[start:start + self.max_batch])
+                results.extend(self._infer(chunk, scales[start:start + self.max_batch], max_num))
+        return results
+
     def _run(self, images: list[np.ndarray], max_num: int) -> list[tuple[np.ndarray, np.ndarray]]:
-        handle = self._ensure_usable()
-        batch = len(images)
         scales = [letterbox_into(image, self._input[i]) for i, image in enumerate(images)]
-        inputs, candidates, counts = self._input[:batch], self._candidates[:batch], self._counts[:batch]
+        return self._infer(self._input[:len(images)], scales, max_num)
+
+    def _infer(self, inputs: np.ndarray, scales: list[float], max_num: int) -> list[tuple[np.ndarray, np.ndarray]]:
+        """One native call on a contiguous (batch, size, size, 3) uint8 array."""
+        handle = self._ensure_usable()
+        batch = inputs.shape[0]
+        assert inputs.flags.c_contiguous and 1 <= batch <= self.max_batch
+        candidates, counts = self._candidates[:batch], self._counts[:batch]
         error = ctypes.create_string_buffer(_ERROR_CAPACITY)
         status = self._native.scrfd_run(
             handle,
