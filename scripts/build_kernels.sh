@@ -21,3 +21,7 @@ echo "compiling for $LOOM_TARGET"
 compile nchw_to_nhwc_f16 scrfd_nchw_to_nhwc_f16 nchw_to_nhwc \
   scrfd.nchw_to_nhwc_f16.size=640 scrfd.nchw_to_nhwc_f16.channels=3 \
   scrfd.nchw_to_nhwc_f16.channels_pad=4
+
+# Everything the graph launches, one line per distinct (kernel, config), generated
+# by tools/gen_launch_table.py from the ONNX file.
+source scripts/kernels.generated

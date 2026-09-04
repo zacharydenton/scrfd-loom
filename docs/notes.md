@@ -88,3 +88,40 @@ configs in the conv and in im2col; a 1x1 conv is the plain matmul whose A *is* t
 tensor, so its K equals the stride and its weights are zero beyond Cin (six tiny
 layers). Rule, used by the export and the host alike:
 `storage_stride(C) = 4 if C <= 4 else align64(C)`.
+- `matmul_add_resized_f16_wmma`: the FPN lateral 1x1 conv with the coarser level
+  added at (b, y/2, x/2) in the epilogue -- nearest/asymmetric/floor is exactly that
+  index shift, so the Resize never exists as a tensor. Exact on both real laterals.
+
+Padded-row cache dilution, measured (best of 5 interleaved, batch 4): storing an
+88-channel tensor 128 wide costs the 80^2 conv **1.004x**; 56 stored 64 wide costs the
+160^2 conv 1.032x. Negligible, so the 64-aligned layout stands and a column-guarded
+compact store is not worth its complexity. That run also put the convs at 16.0 and
+12.6 TFLOP/s -- the earlier 25-30% "drop" after the stride refactor was machine noise.
+
+## The host
+
+`tools/gen_launch_table.py` walks the graph and writes `host/graph_table.inc`, the
+ordered launch table, plus the build lines for every distinct (kernel, config).
+Nothing about the network is transcribed by hand. Folding: every ReLU into its
+producer's variant; every Add hosted on the producer of its *first* input, which
+is scheduled after the tensor it adds (so a downsample block's AvgPool -> 1x1
+shortcut runs before the 3x3 that hosts the add); the box Mul into the export; the
+nine head convs into three fused ones. Result: **57 launches, 40 distinct kernel
+configs, zero Add or Resize launches**, and a liveness allocator packs every tensor
+into **5 buffers, 30 MB/image** (two 13 MB ping-pong buffers and three small).
+All 40 HSACOs compile in 0.22 s.
+
+One bug the in-place hazard check caught before the first run: the raw input was
+aliased to the converted tensor before the convert launch's own source was resolved,
+so it read buffer 0 and wrote buffer 0. Every launch is now checked for
+`dst != src, extra`.
+
+**End to end, first correct run:** all nine raw outputs vs onnxruntime at cosine
+>= 0.999999 (scores max_abs 5e-4, boxes 1e-2, keypoints 9e-3 in stride units);
+decoded detections vs insightface's own: 6 faces, worst 1-IoU 0.0006, score delta
+1e-4, keypoints 0.02 px. The batched Python API matches onnxruntime per image on
+four distinct images.
+
+**First throughput** (10-core CPU job resident): batch 1 **303 img/s, 3.30 ms**;
+batch 32 374 img/s, 2.67 ms -- 10 TFLOP/s effective. MIGraphX: 5.07 ms, 5.3 TFLOP/s,
+batch 1 only. So batch 1 is already 1.54x MIGraphX, before any tuning.
