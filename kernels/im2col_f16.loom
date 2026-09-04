@@ -69,7 +69,7 @@ kernel.def target(@scrfd_im2col_gfx11) export("scrfd_im2col_f16") @scrfd_im2col_
   %work = index.mul %wo, %slots : index
   // (pixel, slot) pairs per workgroup
   // M = B*Ho*Wo is a launch argument: bounded in the body, never by `where`.
-  %m_total = index.assume %out_rows_total [range(%out_rows_total, 1, 16777216), mul(%out_rows_total, 2)] : index
+  %m_total = index.assume %out_rows_total [range(%out_rows_total, 1, 16777216)] : index
   %pixel_rows = index.div %m_total, %wo : index
   // B*Ho
   %in_rows = index.mul %pixel_rows, %stride : index

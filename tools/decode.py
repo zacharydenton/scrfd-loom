@@ -93,7 +93,8 @@ def nms(dets: np.ndarray, thresh: float = NMS_THRESH) -> list[int]:
 
 def postprocess(outputs: list[np.ndarray], det_scale: float, size: int = 640,
                 det_thresh: float = DET_THRESH, nms_thresh: float = NMS_THRESH,
-                max_num: int = 0) -> tuple[np.ndarray, np.ndarray]:
+                max_num: int = 0, metric: str = "default",
+                image_shape: tuple[int, int] | None = None) -> tuple[np.ndarray, np.ndarray]:
     """The nine raw outputs (ONNX order: scores x3, bboxes x3, kps x3) -> (det [n,5], kps [n,5,2]).
 
     Boxes and keypoints are in original-image pixels, as SCRFD.detect returns them.
@@ -123,5 +124,16 @@ def postprocess(outputs: list[np.ndarray], det_scale: float, size: int = 640,
     keep = nms(pre_det, nms_thresh)
     det, kpss = pre_det[keep, :], kpss[keep, :, :]
     if max_num > 0 and det.shape[0] > max_num:
-        det, kpss = det[:max_num], kpss[:max_num]
+        area = (det[:, 2] - det[:, 0]) * (det[:, 3] - det[:, 1])
+        if metric == "max":
+            values = area
+        else:
+            if image_shape is None:
+                raise ValueError("image_shape is required for the default max_num metric")
+            height, width = image_shape
+            offsets = np.vstack(((det[:, 0] + det[:, 2]) / 2 - width // 2,
+                                 (det[:, 1] + det[:, 3]) / 2 - height // 2))
+            values = area - np.sum(np.power(offsets, 2.0), axis=0) * 2.0
+        chosen = values.argsort()[::-1][:max_num]
+        det, kpss = det[chosen], kpss[chosen]
     return det, kpss

@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "insightface's det_10g (SCRFD-10GF) face detector in AMD's Loom kernel language for gfx1151"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = ["numpy>=2.3", "opencv-python>=4.10"]
 
 [project.optional-dependencies]
@@ -16,4 +16,5 @@ dependencies = ["numpy>=2.3", "opencv-python>=4.10"]
 validate = ["onnx>=1.17", "onnxruntime>=1.20"]
 
 [tool.setuptools]
-py-modules = ["scrfd_loom"]
+py-modules = ["scrfd_loom", "scrfd_loom_decode"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]

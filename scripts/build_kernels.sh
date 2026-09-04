@@ -3,8 +3,13 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source scripts/env.sh
-out=build/kernels
-mkdir -p "$out"
+final=build/kernels
+mkdir -p build "$final"
+# Build a complete set off to the side. Only after every compile succeeds do we
+# replace the HSACOs in the public directory, so removed configurations cannot
+# linger and a failed build leaves the previous complete set intact.
+out=$(mktemp -d build/.kernels.XXXXXX)
+trap 'rm -rf "$out"' EXIT
 
 compile() { # source-stem root-symbol output-stem config...
   local src="kernels/$1.loom" root="$2" stem="$3"; shift 3
@@ -23,3 +28,8 @@ compile hwc_u8_to_nhwc_f16 scrfd_hwc_u8_to_nhwc_f16 hwc_u8_to_nhwc scrfd.hwc_u8_
 # Everything the graph launches, one line per distinct (kernel, config), generated
 # by tools/gen_launch_table.py from the ONNX file.
 source scripts/kernels.generated
+
+find "$final" -maxdepth 1 -type f -name '*.hsaco' -delete
+mv "$out"/*.hsaco "$final"/
+rmdir "$out"
+trap - EXIT

@@ -35,6 +35,7 @@ def main() -> int:
         # (name, B, H, W, cin_pad, storage stride, conv stride); the last case
         # gathers 88 channels out of rows stored 128 wide, as the 80^2 layers do.
         for name, batch, h, w, cp, cs, stride in (("tiny s1", 2, 4, 6, 4, 4, 1), ("tiny s2", 2, 4, 6, 4, 4, 2),
+                                                 ("odd rows", 1, 6, 6, 4, 4, 2),
                                                  ("stem s2", 1, 640, 640, 4, 4, 2), ("160^2 s1", 2, 160, 160, 56, 64, 1),
                                                  ("80^2 s2", 2, 160, 160, 56, 64, 2), ("88 in 128", 2, 80, 80, 88, 128, 1)):
             k_pad = (9 * cp + 31) // 32 * 32

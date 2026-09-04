@@ -53,7 +53,7 @@ kernel.def target(@scrfd_conv3x3_n128_f16_wmma_relu_add_gfx11) export("scrfd_con
 } launch(%m_size: index, %a: buffer, %w: buffer, %bias: buffer, %c: buffer, %residual: buffer) {
   %k_size0 = config.get @scrfd.conv3x3_n128_f16_wmma_relu_add.k_size : index
   %n_size0 = config.get @scrfd.conv3x3_n128_f16_wmma_relu_add.n_size : index
-  %k_size = index.assume %k_size0 [range(%k_size0, 32, 8192), mul(%k_size0, 32)] : index
+  %k_size = index.assume %k_size0 [range(%k_size0, 32, 16384), mul(%k_size0, 32)] : index
   %n_size = index.assume %n_size0 [range(%n_size0, 128, 8192), mul(%n_size0, 128)] : index
   %height = config.get @scrfd.conv3x3_n128_f16_wmma_relu_add.height : index
   %width = config.get @scrfd.conv3x3_n128_f16_wmma_relu_add.width : index

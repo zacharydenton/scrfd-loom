@@ -58,7 +58,9 @@ def main() -> int:
 
     require_raises(ValueError, "1..64", lambda: SCRFDLoom(max_batch=65))
     require_raises(ValueError, "det_thresh", lambda: SCRFDLoom(det_thresh=1.5))
+    require_raises(ValueError, "nms_thresh", lambda: SCRFDLoom(nms_thresh=float("nan")))
     require_raises(ValueError, "uint8", lambda: letterbox_into(np.zeros((4, 4, 3), np.float32), np.zeros((640, 640, 3), np.uint8)))
+    require_raises(ValueError, "positive", lambda: letterbox_into(np.zeros((0, 4, 3), np.uint8), np.zeros((640, 640, 3), np.uint8)))
     # Native initialization failures return through the ABI, never exit().
     with tempfile.TemporaryDirectory() as empty:
         require_raises(SCRFDError, "manifest", lambda: SCRFDLoom(weights=empty, max_batch=1))
@@ -106,7 +108,28 @@ def main() -> int:
         model.detect(images[1])
         check("a later call does not mutate an earlier result",
               np.array_equal(first[0], saved[0]) and np.array_equal(first[1], saved[1]))
-        check("max_num caps the result", len(model.detect(img, max_num=2)[0]) == 2)
+        def insightface_order(metric):
+            area = (det[:, 2] - det[:, 0]) * (det[:, 3] - det[:, 1])
+            if metric == "max":
+                values = area
+            else:
+                center = img.shape[0] // 2, img.shape[1] // 2
+                offsets = np.vstack(((det[:, 0] + det[:, 2]) / 2 - center[1],
+                                     (det[:, 1] + det[:, 3]) / 2 - center[0]))
+                values = area - np.sum(np.power(offsets, 2.0), axis=0) * 2.0
+            return values.argsort()[::-1][:4]
+
+        default_order, max_order = insightface_order("default"), insightface_order("max")
+        limited = model.detect(img, (640, 640), 4)
+        limited_max = model.detect(img, max_num=4, metric="max")
+        (batch_limited,) = model.detect_batch([img], 4)
+        check("max_num uses insightface's default area/centre metric",
+              np.array_equal(limited[0], det[default_order]) and np.array_equal(limited[1], kps[default_order]) and
+              np.array_equal(batch_limited[0], limited[0]) and np.array_equal(batch_limited[1], limited[1]))
+        check("metric=max selects by area",
+              np.array_equal(limited_max[0], det[max_order]) and np.array_equal(limited_max[1], kps[max_order]))
+        require_raises(ValueError, "only supports", lambda: model.detect(img, input_size=(320, 320)))
+        require_raises(TypeError, "max_num", lambda: model.detect(img, max_num=2.5))
 
         # A caller's own letterbox: the same canvas must reproduce detect() bitwise,
         # a stacked array is accepted in place, and det_scales=None means canvas pixels.
@@ -127,6 +150,13 @@ def main() -> int:
         check("a different resampler still finds the faces", len(ar_det) == len(det))
         require_raises(ValueError, "uint8", lambda: model.detect_letterboxed([det_img.astype(np.float32)]))
         require_raises(ValueError, "det_scales", lambda: model.detect_letterboxed([det_img], [s, s]))
+        require_raises(ValueError, "positive finite", lambda: model.detect_letterboxed([det_img], [0.0]))
+        require_raises(ValueError, "image_shapes is required",
+                       lambda: model.detect_letterboxed([det_img], [s], max_num=4))
+        (lb_limited,) = model.detect_letterboxed([det_img], [s], max_num=4,
+                                                 image_shapes=[img.shape[:2]])
+        check("letterboxed max_num uses the supplied original image shape",
+              np.array_equal(lb_limited[0], limited[0]) and np.array_equal(lb_limited[1], limited[1]))
 
         # The ABI rejects wrong sizes before launching anything.
         error = ctypes.create_string_buffer(1024)

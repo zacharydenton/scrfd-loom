@@ -104,6 +104,11 @@ model = SCRFDLoom()
 det, kps = model.detect(image_bgr)          # same (n,5) boxes+scores, (n,5,2) keypoints
 ```
 
+The `input_size`, `max_num`, and `metric` arguments follow `SCRFD.detect()`.
+This build is fixed at 640x640, so `input_size` may be `None` or `(640, 640)`;
+other sizes are rejected. `max_num` uses InsightFace's area/centre ranking (or
+area alone for `metric="max"`), rather than simply keeping the highest scores.
+
 `detect_batch(images)` runs up to `max_batch` (default 16) images per GPU call, which
 the deployed ONNX graph cannot do. The session is resident: kernels and weights load
 once, buffers are sized for `max_batch` at construction, and each call is one ctypes
@@ -128,12 +133,14 @@ pixels per landmark away from that, which is enough to move the face crops and t
 embeddings built on them. If your existing vectors came from your own resampler,
 keep it: `detect_letterboxed(canvases, det_scales)` takes already-letterboxed
 `(640, 640, 3)` uint8 BGR canvases (a stacked array is used in place) and maps the
-results back with the `det_scale` you computed.
+results back with the `det_scale` you computed. If it also applies `max_num`
+with the default metric, pass the original `(height, width)` values through
+`image_shapes`; the image centre cannot be recovered from a scale alone.
 
 ## Running it
 
-Needs the Loom toolchain from hrx-system (`scripts/env.sh` points at the build) and
-ROCm for `hipcc`; `requirements.txt` for Python; the `det_10g.onnx` file from
+Needs Python 3.11+, the Loom toolchain from hrx-system (`scripts/env.sh` points at
+the build) and ROCm for `hipcc`; `requirements.txt` for Python; the `det_10g.onnx` file from
 insightface's `buffalo_l` pack.
 
 ```console
@@ -145,6 +152,12 @@ $ ./scripts/build_kernels.sh                # 40 HSACOs, ~0.2 s
 $ ./scripts/build_host.sh                   # host/scrfd CLI + build/libscrfd.so
 $ ./scripts/test.sh                         # everything, ~3 minutes
 ```
+
+`pip install .` installs the importable Python wrapper, but deliberately does
+not bundle the gfx1151-specific library, compiled kernels, or third-party model
+weights. Build those in a checkout as above and pass `library=`, `kernels=`, and
+`weights=`, or set `SCRFD_LOOM_LIBRARY`, `SCRFD_LOOM_KERNELS`, and
+`SCRFD_LOOM_WEIGHTS`.
 
 `scripts/test.sh` is the one test command: formatting, the generated files against
 their generators, the build, every unit test against float64, the runner's error paths,
@@ -163,4 +176,7 @@ docs/       notes.md -- every lever tried, won or lost, with numbers
 
 ## Licence
 
-Apache-2.0 (`LICENSE`). `tools/decode.py` is vendored from deepinsight/insightface, MIT.
+Project code is Apache-2.0 (`LICENSE`). `tools/decode.py` and
+`scrfd_loom_decode.py` contain code derived from deepinsight/insightface under
+MIT; its notice and the separate model-weights licensing warning are in
+`THIRD_PARTY_NOTICES.md`.

@@ -356,6 +356,8 @@ config.decl @{ns}.cin_pad : %value: index where [range(%value, 4, 1024), mul(%va
 config.decl @{ns}.cin_stride : %value: index where [range(%value, 4, 1024), mul(%value, 4)]
 
 config.decl @{ns}.k_size : %value: index where [range(%value, 32, 16384), mul(%value, 32)]""")
+    sub("%k_size = index.assume %k_size0 [range(%k_size0, 32, 8192), mul(%k_size0, 32)]",
+        "%k_size = index.assume %k_size0 [range(%k_size0, 32, 16384), mul(%k_size0, 32)]")
     n_assume = [l for l in s.splitlines() if l.strip().startswith("%n_size = index.assume")][0]
     sub(n_assume + "\n", n_assume + f"""
   %height = config.get @{ns}.height : index

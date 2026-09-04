@@ -10,6 +10,10 @@
 // Built against real ROCm HIP on purpose: it keeps "is the kernel correct"
 // independent of whether the HRX runtime is behaving.
 #include <hip/hip_runtime.h>
+#include <errno.h>
+#include <limits.h>
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,8 +37,11 @@ typedef struct {
 static void *read_file(const char *path, size_t *out_bytes) {
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", path); return NULL; }
-    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    if (fseek(f, 0, SEEK_END) != 0) { fprintf(stderr, "cannot seek %s\n", path); fclose(f); return NULL; }
+    long n = ftell(f);
+    if (n < 0 || fseek(f, 0, SEEK_SET) != 0) { fprintf(stderr, "cannot size %s\n", path); fclose(f); return NULL; }
     void *p = malloc((size_t)n ? (size_t)n : 1);
+    if (!p) { fprintf(stderr, "cannot allocate %ld bytes for %s\n", n, path); fclose(f); return NULL; }
     if (n && fread(p, 1, (size_t)n, f) != (size_t)n) { free(p); fclose(f); return NULL; }
     fclose(f); *out_bytes = (size_t)n; return p;
 }
@@ -58,6 +65,59 @@ static int copy_path(char *dst, size_t cap, const char *src, size_t take) {
     return 1;
 }
 
+static int parse_i32(const char *option, const char *text, int *out) {
+    errno = 0;
+    char *end = NULL;
+    long value = strtol(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' || value < INT_MIN || value > INT_MAX) {
+        fprintf(stderr, "%s wants an integer, got %s\n", option, text);
+        return 0;
+    }
+    *out = (int)value;
+    return 1;
+}
+
+static int parse_f32(const char *option, const char *text, float *out) {
+    errno = 0;
+    char *end = NULL;
+    float value = strtof(text, &end);
+    if (errno == ERANGE || end == text || *end != '\0' || !isfinite(value)) {
+        fprintf(stderr, "%s wants a finite number, got %s\n", option, text);
+        return 0;
+    }
+    *out = value;
+    return 1;
+}
+
+static int parse_dims(const char *option, const char *text, unsigned out[3]) {
+    const char *cursor = text;
+    for (int i = 0; i < 3; ++i) {
+        errno = 0;
+        char *end = NULL;
+        unsigned long value = strtoul(cursor, &end, 10);
+        const char separator = i == 2 ? '\0' : ',';
+        if (errno == ERANGE || end == cursor || *end != separator || value == 0 || value > UINT_MAX) {
+            fprintf(stderr, "%s wants three positive integers x,y,z, got %s\n", option, text);
+            return 0;
+        }
+        out[i] = (unsigned)value;
+        cursor = end + (i == 2 ? 0 : 1);
+    }
+    return 1;
+}
+
+static int parse_bytes(const char *text, size_t *out) {
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' || value == 0 || value > SIZE_MAX) {
+        fprintf(stderr, "--out wants a positive byte count, got %s\n", text);
+        return 0;
+    }
+    *out = (size_t)value;
+    return 1;
+}
+
 int main(int argc, char **argv) {
     const char *hsaco = NULL, *kernel = NULL;
     unsigned grid[3] = {1, 1, 1}, block[3] = {1, 1, 1};
@@ -73,17 +133,22 @@ int main(int argc, char **argv) {
                         : (fprintf(stderr, "too many args (max %d)\n", MAX_ARGS), exit(64), 0))
         if      (!strcmp(a, "--hsaco"))  hsaco = NEXT();
         else if (!strcmp(a, "--kernel")) kernel = NEXT();
-        else if (!strcmp(a, "--grid"))   sscanf(NEXT(), "%u,%u,%u", &grid[0], &grid[1], &grid[2]);
-        else if (!strcmp(a, "--block"))  sscanf(NEXT(), "%u,%u,%u", &block[0], &block[1], &block[2]);
-        else if (!strcmp(a, "--repeat")) repeat = atoi(NEXT());
+        else if (!strcmp(a, "--grid"))   { if (!parse_dims(a, NEXT(), grid)) return 64; }
+        else if (!strcmp(a, "--block"))  { if (!parse_dims(a, NEXT(), block)) return 64; }
+        else if (!strcmp(a, "--repeat")) {
+            if (!parse_i32(a, NEXT(), &repeat) || repeat < 1) {
+                if (repeat < 1) fprintf(stderr, "--repeat must be at least 1\n");
+                return 64;
+            }
+        }
         else if (!strcmp(a, "--verbose")) verbose = 1;
         else if (!strcmp(a, "--i32")) {
             args[SLOT()].kind = ARG_I32;
-            args[arg_count].scalar.i32 = atoi(NEXT());
+            if (!parse_i32(a, NEXT(), &args[arg_count].scalar.i32)) return 64;
             arg_count++;
         } else if (!strcmp(a, "--f32")) {
             args[SLOT()].kind = ARG_F32;
-            args[arg_count].scalar.f32 = (float)atof(NEXT());
+            if (!parse_f32(a, NEXT(), &args[arg_count].scalar.f32)) return 64;
             arg_count++;
         } else if (!strcmp(a, "--in")) {
             args[SLOT()].kind = ARG_BUFFER; args[arg_count].is_output = 0;
@@ -104,7 +169,7 @@ int main(int argc, char **argv) {
             // was being passed as snprintf's size and would overflow path[].
             if (!copy_path(args[arg_count].path, sizeof(args[arg_count].path), spec,
                            (size_t)(colon - spec))) return 64;
-            args[arg_count].bytes = strtoull(colon + 1, NULL, 10);
+            if (!parse_bytes(colon + 1, &args[arg_count].bytes)) return 64;
             arg_count++;
         } else { fprintf(stderr, "unknown option %s\n", a); return 64; }
     }
@@ -148,9 +213,12 @@ int main(int argc, char **argv) {
 
     hipEvent_t start, stop;
     HIP_CHECK(hipEventCreate(&start)); HIP_CHECK(hipEventCreate(&stop));
-    // No warm-up when a single launch was asked for: in-place kernels must run
-    // exactly once or the correctness check sees the transform applied twice.
-    if (repeat > 1) {
+    int has_inout = 0;
+    for (int i = 0; i < arg_count; ++i)
+        has_inout |= args[i].kind == ARG_BUFFER && args[i].is_output == 2;
+    // An in-place input cannot be warmed without changing the measured run's
+    // starting state. Its saved result must represent exactly `repeat` launches.
+    if (repeat > 1 && !has_inout) {
         HIP_CHECK(hipModuleLaunchKernel(function, grid[0], grid[1], grid[2],
                                         block[0], block[1], block[2], 0, NULL, NULL, config));
         HIP_CHECK(hipDeviceSynchronize());
@@ -171,10 +239,13 @@ int main(int argc, char **argv) {
         arg_t *arg = &args[i];
         if (arg->kind != ARG_BUFFER || !arg->is_output) continue;
         void *host = malloc(arg->bytes);
+        if (!host) { fprintf(stderr, "cannot allocate %zu output bytes\n", arg->bytes); return 1; }
         HIP_CHECK(hipMemcpyDtoH(host, (hipDeviceptr_t)arg->device_ptr, arg->bytes));
         FILE *f = fopen(arg->path, "wb");
-        if (!f) { fprintf(stderr, "cannot write %s\n", arg->path); return 1; }
-        fwrite(host, 1, arg->bytes, f);
+        if (!f) { fprintf(stderr, "cannot write %s\n", arg->path); free(host); return 1; }
+        if (fwrite(host, 1, arg->bytes, f) != arg->bytes) {
+            fprintf(stderr, "short write to %s\n", arg->path); fclose(f); free(host); return 1;
+        }
         fclose(f); free(host);
     }
     for (int i = 0; i < arg_count; ++i)

@@ -73,6 +73,9 @@ def main() -> int:
         tmp = Path(tmp)
         ok &= run_case(tmp, rng, "tiny s1", 2, 4, 64, 4, 6, 1)
         ok &= run_case(tmp, rng, "tiny s2", 2, 4, 64, 4, 6, 2)
+        # Cin=1024 makes K=9216 and exercises the upper half of the declared
+        # k_size range, which must agree with the optimizer's index assumption.
+        ok &= run_case(tmp, rng, "wide k", 1, 1024, 64, 2, 2, 1)
         # Every epilogue variant, on the tiny shape (all halo cases) and one real layer.
         for variant in ("relu", "add", "relu_add"):
             ok &= run_case(tmp, rng, "tiny s1", 2, 4, 64, 4, 6, 1, variant=variant)

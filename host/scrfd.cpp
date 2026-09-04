@@ -160,53 +160,52 @@ class Session {
 public:
     Session(const std::string &weights_dir, const std::string &kernels_dir, int max_batch)
         : max_batch_(max_batch) {
-        if (max_batch < 1 || max_batch > MAX_BATCH)
-            throw std::invalid_argument("max_batch must be 1.." + std::to_string(MAX_BATCH));
-        HIP_CHECK(hipInit(0));
+        try {
+            if (max_batch < 1 || max_batch > MAX_BATCH)
+                throw std::invalid_argument("max_batch must be 1.." + std::to_string(MAX_BATCH));
+            HIP_CHECK(hipInit(0));
 
-        auto spans16 = read_manifest(weights_dir + "/manifest_f16.txt");
-        auto spans32 = read_manifest(weights_dir + "/manifest.txt");
-        auto blob16 = read_file(weights_dir + "/weights_f16.bin");
-        auto blob32 = read_file(weights_dir + "/weights.bin");
-        check_spans(spans16, blob16.size(), 2, "manifest_f16.txt");
-        check_spans(spans32, blob32.size(), 4, "manifest.txt");
-        HIP_CHECK(hipMalloc(&weights16_, blob16.size()));
-        HIP_CHECK(hipMalloc(&weights32_, blob32.size()));
-        HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)weights16_, blob16.data(), blob16.size()));
-        HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)weights32_, blob32.data(), blob32.size()));
+            auto spans16 = read_manifest(weights_dir + "/manifest_f16.txt");
+            auto spans32 = read_manifest(weights_dir + "/manifest.txt");
+            auto blob16 = read_file(weights_dir + "/weights_f16.bin");
+            auto blob32 = read_file(weights_dir + "/weights.bin");
+            check_spans(spans16, blob16.size(), 2, "manifest_f16.txt");
+            check_spans(spans32, blob32.size(), 4, "manifest.txt");
+            HIP_CHECK(hipMalloc(&weights16_, blob16.size()));
+            HIP_CHECK(hipMalloc(&weights32_, blob32.size()));
+            HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)weights16_, blob16.data(), blob16.size()));
+            HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)weights32_, blob32.data(), blob32.size()));
 
-        kernels_.resize(SCRFD_KERNEL_COUNT);
-        std::vector<bool> loaded(SCRFD_KERNEL_COUNT, false);
-        for (int i = 0; i < SCRFD_LAUNCH_COUNT; ++i) {
-            const auto &l = scrfd_launches[i];
-            if (!loaded[l.kernel]) {
-                kernels_[l.kernel].load(kernels_dir + "/" + scrfd_kernel_stems[l.kernel] + ".hsaco", symbol_for(l));
-                loaded[l.kernel] = true;
+            kernels_.resize(SCRFD_KERNEL_COUNT);
+            std::vector<bool> loaded(SCRFD_KERNEL_COUNT, false);
+            for (int i = 0; i < SCRFD_LAUNCH_COUNT; ++i) {
+                const auto &l = scrfd_launches[i];
+                if (!loaded[l.kernel]) {
+                    kernels_[l.kernel].load(kernels_dir + "/" + scrfd_kernel_stems[l.kernel] + ".hsaco", symbol_for(l));
+                    loaded[l.kernel] = true;
+                }
+                if (l.kind == 1 || l.kind == 2) {
+                    weight_off_[i] = require(spans16, l.name, size_t(l.n_size) * l.k_size, "manifest_f16.txt");
+                    bias_off_[i] = require(spans32, std::string(l.name) + "_b", size_t(l.n_size), "manifest.txt");
+                }
             }
-            if (l.kind == 1 || l.kind == 2) {
-                weight_off_[i] = require(spans16, l.name, size_t(l.n_size) * l.k_size, "manifest_f16.txt");
-                bias_off_[i] = require(spans32, std::string(l.name) + "_b", size_t(l.n_size), "manifest.txt");
-            }
+
+            buffers_.resize(SCRFD_BUFFER_COUNT);
+            for (int b = 0; b < SCRFD_BUFFER_COUNT; ++b)
+                HIP_CHECK(hipMalloc(&buffers_[b], scrfd_buffer_bytes[b] * max_batch));
+            HIP_CHECK(hipMalloc(&input_, input_bytes(max_batch)));
+            // The heads come back to pinned host memory: the copy is faster and the
+            // decode reads it straight away.
+            for (int lv = 0; lv < LEVELS; ++lv)
+                HIP_CHECK(hipHostMalloc(&heads_host_[lv], head_elements(lv, max_batch) * sizeof(uint16_t),
+                                        hipHostMallocDefault));
+        } catch (...) {
+            release();
+            throw;
         }
-
-        buffers_.resize(SCRFD_BUFFER_COUNT);
-        for (int b = 0; b < SCRFD_BUFFER_COUNT; ++b)
-            HIP_CHECK(hipMalloc(&buffers_[b], scrfd_buffer_bytes[b] * max_batch));
-        HIP_CHECK(hipMalloc(&input_, input_bytes(max_batch)));
-        // The heads come back to pinned host memory: the copy is faster and the
-        // decode reads it straight away.
-        for (int lv = 0; lv < LEVELS; ++lv)
-            HIP_CHECK(hipHostMalloc(&heads_host_[lv], head_elements(lv, max_batch) * sizeof(uint16_t),
-                                    hipHostMallocDefault));
     }
 
-    ~Session() {
-        // Best-effort teardown; a destructor must not throw.
-        for (auto *b : buffers_) (void)hipFree(b);
-        for (auto *h : heads_host_) if (h) (void)hipHostFree(h);
-        (void)hipFree(input_); (void)hipFree(weights16_); (void)hipFree(weights32_);
-        for (auto &k : kernels_) if (k.module) (void)hipModuleUnload(k.module);
-    }
+    ~Session() { release(); }
 
     int max_batch() const { return max_batch_; }
     Profiler profiler;
@@ -369,6 +368,29 @@ public:
     }
 
 private:
+    void release() noexcept {
+        // Construction can fail after any individual allocation or module load.
+        // Clear every handle as it is released so this is also safe for normal
+        // destruction and for partially initialized vectors.
+        for (auto *&b : buffers_) {
+            if (b) (void)hipFree(b);
+            b = nullptr;
+        }
+        for (auto *&h : heads_host_) {
+            if (h) (void)hipHostFree(h);
+            h = nullptr;
+        }
+        if (input_) (void)hipFree(input_);
+        if (weights16_) (void)hipFree(weights16_);
+        if (weights32_) (void)hipFree(weights32_);
+        input_ = weights16_ = weights32_ = nullptr;
+        for (auto &k : kernels_) {
+            if (k.module) (void)hipModuleUnload(k.module);
+            k.module = nullptr;
+            k.function = nullptr;
+        }
+    }
+
     int max_batch_;
     std::mutex mutex_;
     std::vector<Kernel> kernels_;
@@ -438,6 +460,15 @@ int parse_integer(const std::string &option, const std::string &text) {
     return static_cast<int>(value);
 }
 
+float parse_float(const std::string &option, const std::string &text) {
+    errno = 0;
+    char *end = nullptr;
+    float value = std::strtof(text.c_str(), &end);
+    if (errno == ERANGE || end == text.c_str() || *end != '\0' || !std::isfinite(value))
+        throw std::invalid_argument(option + " must be a finite number, got '" + text + "'");
+    return value;
+}
+
 // CLI: the same session driven from files, for validation and profiling.
 //   host/scrfd --weights build/weights --kernels build/kernels --input images.bin
 //              [--batch N] [--repeat N] [--thresh T] [--profile] [--output heads.bin]
@@ -460,7 +491,7 @@ int cli_main(int argc, char **argv) {
         else if (a == "--output") output_path = next();
         else if (a == "--batch") batch = parse_integer(a, next());
         else if (a == "--repeat") repeat = parse_integer(a, next());
-        else if (a == "--thresh") det_thresh = std::strtof(next().c_str(), nullptr);
+        else if (a == "--thresh") det_thresh = parse_float(a, next());
         else if (a == "--profile") profile = true;
         else throw std::invalid_argument("unknown option " + a);
     }

@@ -36,8 +36,13 @@ step "launch table matches the graph" bash -c '
   cp host/graph_table.inc "$tmpdir/table.inc" && cp scripts/kernels.generated "$tmpdir/kernels.generated" &&
   python3 tools/gen_launch_table.py >/dev/null &&
   cmp -s host/graph_table.inc "$tmpdir/table.inc" && cmp -s scripts/kernels.generated "$tmpdir/kernels.generated"'
+step "wheel imports independently" python3 tools/test_package.py
 step "export weights" python3 tools/export_weights.py
 step "build kernels" ./scripts/build_kernels.sh
+step "kernel build contains no stale HSACOs" bash -c '
+  { echo hwc_u8_to_nhwc.hsaco; awk "/^compile / {print \$4 \".hsaco\"}" scripts/kernels.generated; } | sort > "$tmpdir/expected-hsaco" &&
+  find build/kernels -maxdepth 1 -type f -name "*.hsaco" -printf "%f\n" | sort > "$tmpdir/actual-hsaco" &&
+  cmp -s "$tmpdir/expected-hsaco" "$tmpdir/actual-hsaco"'
 step "build host programs" ./scripts/build_host.sh
 
 step "uint8 bgr -> nhwc f16"   python3 tools/test_convert.py
@@ -57,7 +62,10 @@ step "runner rejects bad input" bash -c '
   printf short > "$tmpdir/short.bin"
   python3 -c "import numpy as np; np.zeros(2*640*640*3, np.uint8).tofile(\"$tmpdir/two.bin\")"
   rejects "needs a value"     ./host/scrfd --batch                                   &&
+  rejects "three positive"    ./host/loomrun --hsaco nope --kernel nope --grid bad   &&
+  rejects "at least 1"        ./host/loomrun --hsaco nope --kernel nope --repeat 0    &&
   rejects "must be 1"         ./host/scrfd --input "$tmpdir/two.bin" --batch 0       &&
+  rejects "finite number"     ./host/scrfd --input "$tmpdir/two.bin" --thresh 0.5x   &&
   rejects "input is required" ./host/scrfd                                           &&
   rejects "not a multiple"    ./host/scrfd --input "$tmpdir/short.bin"               &&
   rejects "holds 2 images"    ./host/scrfd --input "$tmpdir/two.bin" --batch 3'
