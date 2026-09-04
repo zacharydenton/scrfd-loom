@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scrfd-loom"
+version = "0.1.0"
+description = "insightface's det_10g (SCRFD-10GF) face detector in AMD's Loom kernel language for gfx1151"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = ["numpy>=2.3", "opencv-python>=4.10"]
+
+[project.optional-dependencies]
+# Reading the ONNX graph (export, reference) and the oracle (validation, benchmarks).
+validate = ["onnx>=1.17", "onnxruntime>=1.20"]
+
+[tool.setuptools]
+py-modules = ["scrfd_loom"]
