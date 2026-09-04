@@ -1,0 +1,127 @@
+// 2x2, stride-2, no-pad pooling over NHWC f16: max for the stem's MaxPool, mean
+// for the three downsample-shortcut AveragePools. One kernel, the reduction is
+// a config.
+//
+//   out[(b*Ho + yo)*Wo + xo, c] = op(in[(b*H + 2yo+dy)*W + 2xo+dx, c] for dy,dx in 0..1)
+//
+// One workgroup per output pixel row (b, yo); 256 workitems cover the Wo pixels
+// times the C/4 vector slots. Bandwidth-trivial; four coalesced vector<4xf16>
+// reads per store.
+
+amdgpu.target<gfx11-generic> @scrfd_pool2_gfx11 {subgroup_size = 32}
+
+// Input height/width; output is H/2 x W/2.
+config.decl @scrfd.pool2_f16.height : %value: index where [range(%value, 2, 4096), mul(%value, 2)]
+
+config.decl @scrfd.pool2_f16.width : %value: index where [range(%value, 2, 4096), mul(%value, 2)]
+
+config.decl @scrfd.pool2_f16.channels : %value: index where [range(%value, 4, 1024), mul(%value, 4)]
+
+// 1 = max, 0 = mean.
+config.decl @scrfd.pool2_f16.take_max : %value: index where [range(%value, 0, 1)]
+
+kernel.def target(@scrfd_pool2_gfx11) export("scrfd_pool2_f16") @scrfd_pool2_f16(%out_rows_total: index) {
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c256 = index.constant 256 : index
+  %width = config.get @scrfd.pool2_f16.width : index
+  %wo = index.div %width, %c2 : index
+  %pixel_rows = index.div %out_rows_total, %wo : index
+  kernel.launch.config workgroups(%pixel_rows, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
+} launch(%out_rows_total: index, %input: buffer, %output: buffer) {
+  %height = config.get @scrfd.pool2_f16.height : index
+  %width = config.get @scrfd.pool2_f16.width : index
+  %channels = config.get @scrfd.pool2_f16.channels : index
+  %take_max = config.get @scrfd.pool2_f16.take_max : index
+
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c256 = index.constant 256 : index
+  %c0_offset = index.constant 0 : offset
+  %quarter = scalar.constant 0.25 : f32
+  %quarter4 = vector.splat %quarter : vector<4xf32>
+
+  %ho = index.div %height, %c2 : index
+  %wo = index.div %width, %c2 : index
+  %slots = index.div %channels, %c4 : index
+  %c_limit = index.sub %channels, %c4 : index
+  %work = index.mul %wo, %slots : index
+
+  %m_total = index.assume %out_rows_total [range(%out_rows_total, 1, 16777216)] : index
+  %pixel_rows = index.div %m_total, %wo : index
+  %in_rows = index.mul %pixel_rows, %c2 : index
+  %in_rows_total = index.mul %in_rows, %width : index
+
+  %prow_raw = kernel.workgroup.id<x> : index
+  %workitem = kernel.workitem.id<x> : index
+  %valid = index.cmp ult, %prow_raw, %pixel_rows : index
+  %safe_prow = scf.select %valid, %prow_raw, %c0 : index
+  %prow = index.assume %safe_prow [lt(%safe_prow, %pixel_rows)] : index
+  %image = index.div %prow, %ho : index
+  %yo = index.rem %prow, %ho : index
+  %image_rows = index.mul %image, %height : index
+  %m_base = index.mul %prow, %wo : index
+  %is_max = index.cmp eq, %take_max, %c1 : index
+
+  %input_global = buffer.assume.memory_space<global> %input : buffer
+  %output_global = buffer.assume.memory_space<global> %output : buffer
+  %input_aligned = buffer.assume.alignment %input_global {minimum_alignment = 8} : buffer
+  %output_aligned = buffer.assume.alignment %output_global {minimum_alignment = 8} : buffer
+  %input_view = buffer.view %input_aligned[%c0_offset] : buffer -> view<[%in_rows_total]x[%channels]xf16>
+  %output_view = buffer.view %output_aligned[%c0_offset] : buffer -> view<[%m_total]x[%channels]xf16>
+
+  scf.if %valid {
+    scf.for %item = [%workitem to %work step %c256] {
+      %xo = index.div %item, %slots : index
+      %slot = index.rem %item, %slots : index
+      %c0_raw = index.mul %slot, %c4 : index
+      %c = index.assume %c0_raw [le(%c0_raw, %c_limit), mul(%c0_raw, 4)] : index
+      %m0 = index.add %m_base, %xo : index
+      %m = index.assume %m0 [lt(%m0, %m_total)] : index
+
+      // The 2x2 window: rows 2yo and 2yo+1, columns 2xo and 2xo+1, all inside
+      // the image because H and W are even and there is no padding.
+      %yi_a = index.mul %yo, %c2 : index
+      %yi_b = index.add %yi_a, %c1 : index
+      %xi_a = index.mul %xo, %c2 : index
+      %xi_b = index.add %xi_a, %c1 : index
+      %row_a0 = index.add %image_rows, %yi_a : index
+      %row_b0 = index.add %image_rows, %yi_b : index
+      %row_aw = index.mul %row_a0, %width : index
+      %row_bw = index.mul %row_b0, %width : index
+      %aa0 = index.add %row_aw, %xi_a : index
+      %ab0 = index.add %row_aw, %xi_b : index
+      %ba0 = index.add %row_bw, %xi_a : index
+      %bb0 = index.add %row_bw, %xi_b : index
+      %aa = index.assume %aa0 [lt(%aa0, %in_rows_total)] : index
+      %ab = index.assume %ab0 [lt(%ab0, %in_rows_total)] : index
+      %ba = index.assume %ba0 [lt(%ba0, %in_rows_total)] : index
+      %bb = index.assume %bb0 [lt(%bb0, %in_rows_total)] : index
+      %h_aa = vector.load %input_view[%aa, %c] : view<[%in_rows_total]x[%channels]xf16> -> vector<4xf16>
+      %h_ab = vector.load %input_view[%ab, %c] : view<[%in_rows_total]x[%channels]xf16> -> vector<4xf16>
+      %h_ba = vector.load %input_view[%ba, %c] : view<[%in_rows_total]x[%channels]xf16> -> vector<4xf16>
+      %h_bb = vector.load %input_view[%bb, %c] : view<[%in_rows_total]x[%channels]xf16> -> vector<4xf16>
+      %v_aa = vector.extf %h_aa : vector<4xf16> to vector<4xf32>
+      %v_ab = vector.extf %h_ab : vector<4xf16> to vector<4xf32>
+      %v_ba = vector.extf %h_ba : vector<4xf16> to vector<4xf32>
+      %v_bb = vector.extf %h_bb : vector<4xf16> to vector<4xf32>
+      %result = scf.if %is_max -> (vector<4xf32>) {
+        %m1 = vector.maxnumf %v_aa, %v_ab : vector<4xf32>
+        %m2 = vector.maxnumf %v_ba, %v_bb : vector<4xf32>
+        %m3 = vector.maxnumf %m1, %m2 : vector<4xf32>
+        scf.yield %m3 : vector<4xf32>
+      } else {
+        %s1 = vector.addf %v_aa, %v_ab : vector<4xf32>
+        %s2 = vector.addf %v_ba, %v_bb : vector<4xf32>
+        %s3 = vector.addf %s1, %s2 : vector<4xf32>
+        %mean = vector.mulf %s3, %quarter4 : vector<4xf32>
+        scf.yield %mean : vector<4xf32>
+      }
+      %narrow = vector.fptrunc %result : vector<4xf32> to vector<4xf16>
+      vector.store %narrow, %output_view[%m, %c] : vector<4xf16>, view<[%m_total]x[%channels]xf16>
+    }
+  }
+  kernel.return
+}

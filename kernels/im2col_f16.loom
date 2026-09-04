@@ -26,6 +26,9 @@ config.decl @scrfd.im2col_f16.stride : %value: index where [range(%value, 1, 2)]
 
 config.decl @scrfd.im2col_f16.cin_pad : %value: index where [range(%value, 4, 1024), mul(%value, 4)]
 
+// Physical channel stride of the input rows (see conv3x3_f16_wmma.loom).
+config.decl @scrfd.im2col_f16.cin_stride : %value: index where [range(%value, 4, 1024), mul(%value, 4)]
+
 config.decl @scrfd.im2col_f16.k_pad : %value: index where [range(%value, 32, 16384), mul(%value, 32)]
 
 kernel.def target(@scrfd_im2col_gfx11) export("scrfd_im2col_f16") @scrfd_im2col_f16(%out_rows_total: index) {
@@ -41,6 +44,7 @@ kernel.def target(@scrfd_im2col_gfx11) export("scrfd_im2col_f16") @scrfd_im2col_
   %width = config.get @scrfd.im2col_f16.width : index
   %stride = config.get @scrfd.im2col_f16.stride : index
   %cin_pad = config.get @scrfd.im2col_f16.cin_pad : index
+  %cin_stride = config.get @scrfd.im2col_f16.cin_stride : index
   %k_pad = config.get @scrfd.im2col_f16.k_pad : index
 
   %c0 = index.constant 0 : index
@@ -85,7 +89,7 @@ kernel.def target(@scrfd_im2col_gfx11) export("scrfd_im2col_f16") @scrfd_im2col_
   %cols_global = buffer.assume.memory_space<global> %cols : buffer
   %input_aligned = buffer.assume.alignment %input_global {minimum_alignment = 8} : buffer
   %cols_aligned = buffer.assume.alignment %cols_global {minimum_alignment = 8} : buffer
-  %input_view = buffer.view %input_aligned[%c0_offset] : buffer -> view<[%in_rows_total]x[%cin_pad]xf16>
+  %input_view = buffer.view %input_aligned[%c0_offset] : buffer -> view<[%in_rows_total]x[%cin_stride]xf16>
   %cols_view = buffer.view %cols_aligned[%c0_offset] : buffer -> view<[%m_total]x[%k_pad]xf16>
 
   scf.if %valid {
@@ -127,7 +131,7 @@ kernel.def target(@scrfd_im2col_gfx11) export("scrfd_im2col_f16") @scrfd_im2col_
           %in_row0 = index.add %row_yw, %xi : index
           %in_row = index.assume %in_row0 [lt(%in_row0, %in_rows_total)] : index
           %c_col = index.assume %c [le(%c, %c_limit), mul(%c, 4)] : index
-          %v = vector.load %input_view[%in_row, %c_col] : view<[%in_rows_total]x[%cin_pad]xf16> -> vector<4xf16>
+          %v = vector.load %input_view[%in_row, %c_col] : view<[%in_rows_total]x[%cin_stride]xf16> -> vector<4xf16>
           scf.yield %v : vector<4xf16>
         } else {
           scf.yield %zero4 : vector<4xf16>

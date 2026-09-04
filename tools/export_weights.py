@@ -33,10 +33,21 @@ def align(n: int, a: int) -> int:
     return (n + a - 1) // a * a
 
 
+def storage_stride(channels: int) -> int:
+    """Physical channel stride of an NHWC activation: every conv writes its
+    Cout_pad (64-aligned) columns, so that is the width its consumers see; the
+    converted stem image is the one 4-wide tensor."""
+    return 4 if channels <= 4 else align(channels, COUT_ALIGN)
+
+
 def pack(weight: np.ndarray, bias: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
     """[Cout][Cin][k][k], [Cout] -> W16[Cout_pad][K_pad], b32[Cout_pad], shape info."""
     cout, cin, k, _ = weight.shape
-    cin_pad, cout_pad = align(cin, CIN_ALIGN), align(cout, COUT_ALIGN)
+    cout_pad = align(cout, COUT_ALIGN)
+    # A 3x3 conv gathers c < cin_pad (4-aligned) inside rows of the input's
+    # storage stride. A 1x1 conv is the plain matmul, whose A *is* the input
+    # tensor, so its K must equal that stride and the weights are zero beyond cin.
+    cin_pad = align(cin, CIN_ALIGN) if k == 3 else storage_stride(cin)
     k_pad = align(k * k * cin_pad, K_ALIGN)
     w = np.zeros((cout_pad, k * k, cin_pad), np.float32)
     w[:cout, :, :cin] = weight.transpose(0, 2, 3, 1).reshape(cout, k * k, cin)   # [co][dy*k+dx][c]
@@ -44,7 +55,8 @@ def pack(weight: np.ndarray, bias: np.ndarray) -> tuple[np.ndarray, np.ndarray, 
     w = np.concatenate([w, np.zeros((cout_pad, k_pad - w.shape[1]), np.float32)], axis=1)
     b = np.zeros(cout_pad, np.float32)
     b[:cout] = bias
-    info = dict(cout=cout, cin=cin, k=k, cin_pad=cin_pad, k_pad=k_pad, cout_pad=cout_pad)
+    info = dict(cout=cout, cin=cin, k=k, cin_pad=cin_pad, cin_stride=storage_stride(cin),
+                k_pad=k_pad, cout_pad=cout_pad)
     return w.astype(np.float16), b, info
 
 

@@ -32,21 +32,23 @@ def main() -> int:
     rng = np.random.default_rng(5)
     with workdir() as tmp:
         tmp = Path(tmp)
-        for name, batch, h, w, cp, stride in (("tiny s1", 2, 4, 6, 4, 1), ("tiny s2", 2, 4, 6, 4, 2),
-                                             ("stem s2", 1, 640, 640, 4, 2), ("160^2 s1", 2, 160, 160, 56, 1),
-                                             ("80^2 s2", 2, 160, 160, 56, 2)):
+        # (name, B, H, W, cin_pad, storage stride, conv stride); the last case
+        # gathers 88 channels out of rows stored 128 wide, as the 80^2 layers do.
+        for name, batch, h, w, cp, cs, stride in (("tiny s1", 2, 4, 6, 4, 4, 1), ("tiny s2", 2, 4, 6, 4, 4, 2),
+                                                 ("stem s2", 1, 640, 640, 4, 4, 2), ("160^2 s1", 2, 160, 160, 56, 64, 1),
+                                                 ("80^2 s2", 2, 160, 160, 56, 64, 2), ("88 in 128", 2, 80, 80, 88, 128, 1)):
             k_pad = (9 * cp + 31) // 32 * 32
             hsaco = tmp / f"im2col_{h}_{w}_{cp}_{stride}.hsaco"
             compile_kernel(ROOT / "kernels/im2col_f16.loom", "scrfd_im2col_f16",
                            {f"{P}.height": h, f"{P}.width": w, f"{P}.stride": stride,
-                            f"{P}.cin_pad": cp, f"{P}.k_pad": k_pad}, hsaco)
-            x = rng.standard_normal((batch, h, w, cp)).astype(np.float16)
+                            f"{P}.cin_pad": cp, f"{P}.cin_stride": cs, f"{P}.k_pad": k_pad}, hsaco)
+            x = rng.standard_normal((batch, h, w, cs)).astype(np.float16)
             ho, wo = h // stride, w // stride
             m = batch * ho * wo
             (cols,), timing = launch(hsaco, "scrfd_im2col_f16", (batch * ho, 1, 1), (256, 1, 1),
-                                     [("i32", m), ("in_f16", x.reshape(-1, cp)),
+                                     [("i32", m), ("in_f16", x.reshape(-1, cs)),
                                       ("out_f16", ((m, k_pad), np.float16))], tmp, repeat=10)
-            want = im2col_ref(x, stride, k_pad)
+            want = im2col_ref(x[..., :cp], stride, k_pad)
             ok &= report(f"{name:<9s} B={batch} {h}x{w}x{cp} -> [{m}x{k_pad}] "
                          f"({timing['per_launch_us']:8.2f} us, {m * k_pad * 2 / (timing['per_launch_us'] * 1e-6) / 1e9:5.1f} GB/s out)",
                          cols, want, atol=0, rtol=0)

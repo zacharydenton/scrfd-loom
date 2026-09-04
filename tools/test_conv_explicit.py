@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kernel_test import compile_kernel, launch, report, workdir, ROOT
 import graph as G
 import reference as R
-from export_weights import pack
+from export_weights import pack, storage_stride
 
 IM = "scrfd.im2col_f16"
 MM = "dinov3.matmul_bias_f16_wmma_af16_cf16"
@@ -35,20 +35,21 @@ def main() -> int:
             w16, b32, info = pack(op.weight, op.bias)
             cp, k_pad, cout_pad = info["cin_pad"], info["k_pad"], info["cout_pad"]
             _, cin, h, w = graph.shapes[op.inputs[0]]
+            cs = storage_stride(cin)
             s = op.stride
             ho, wo = h // s, w // s
             m = batch * ho * wo
 
             x = (rng.standard_normal((batch, cin, h, w)) * 0.5).astype(np.float32)
-            x_nhwc = np.zeros((batch, h, w, cp), np.float16)
+            x_nhwc = np.zeros((batch, h, w, cs), np.float16)
             x_nhwc[..., :cin] = x.transpose(0, 2, 3, 1).astype(np.float16)
 
             h_im = tmp / f"im2col_{name}.hsaco"
             compile_kernel(ROOT / "kernels/im2col_f16.loom", "scrfd_im2col_f16",
                            {f"{IM}.height": h, f"{IM}.width": w, f"{IM}.stride": s,
-                            f"{IM}.cin_pad": cp, f"{IM}.k_pad": k_pad}, h_im)
+                            f"{IM}.cin_pad": cp, f"{IM}.cin_stride": cs, f"{IM}.k_pad": k_pad}, h_im)
             (cols,), t_im = launch(h_im, "scrfd_im2col_f16", (batch * ho, 1, 1), (256, 1, 1),
-                                   [("i32", m), ("in_f16", x_nhwc.reshape(-1, cp)),
+                                   [("i32", m), ("in_f16", x_nhwc.reshape(-1, cs)),
                                     ("out_f16", ((m, k_pad), np.float16))], tmp, repeat=5)
 
             h_mm = tmp / f"mm_{name}.hsaco"
