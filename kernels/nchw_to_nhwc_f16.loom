@@ -1,0 +1,81 @@
+// The stem's input conversion: NCHW f32 (what insightface's blobFromImage
+// produces, already normalised) -> NHWC f16 with the channel count padded, so
+// the 3-channel image becomes 4-channel rows and every later gather of a
+// vector<4xf16> stays inside one tap.
+//
+//   out[(b*S + y)*S + x, c] = c < channels ? in[(b*channels + c)*S + y, x] : 0
+//
+// One workgroup per image row (b, y); 256 workitems stride the S pixels. The
+// three input planes are read coalesced along x. Bandwidth-trivial (~8 MB per
+// image), so the stores are four scalar f16s rather than an assembled vector.
+
+amdgpu.target<gfx11-generic> @scrfd_nchw_to_nhwc_gfx11 {subgroup_size = 32}
+
+config.decl @scrfd.nchw_to_nhwc_f16.size : %value: index where [range(%value, 16, 4096), mul(%value, 16)]
+
+config.decl @scrfd.nchw_to_nhwc_f16.channels : %value: index where [range(%value, 1, 4)]
+
+config.decl @scrfd.nchw_to_nhwc_f16.channels_pad : %value: index where [range(%value, 4, 4)]
+
+kernel.def target(@scrfd_nchw_to_nhwc_gfx11) export("scrfd_nchw_to_nhwc_f16") @scrfd_nchw_to_nhwc_f16(%row_count: index) {
+  %c1 = index.constant 1 : index
+  %c256 = index.constant 256 : index
+  kernel.launch.config workgroups(%row_count, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
+} launch(%row_count: index, %input: buffer, %output: buffer) {
+  %size = config.get @scrfd.nchw_to_nhwc_f16.size : index
+  %channels = config.get @scrfd.nchw_to_nhwc_f16.channels : index
+  %channels_pad = config.get @scrfd.nchw_to_nhwc_f16.channels_pad : index
+
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c256 = index.constant 256 : index
+  %c0_offset = index.constant 0 : offset
+  %zero_half = scalar.constant 0.0 : f16
+
+  // row_count = B*S is a launch argument; bound it in the body, never with a
+  // `where` on the launch (that miscompiles under hipModuleLaunchKernel).
+  %rows = index.assume %row_count [range(%row_count, 1, 1048576)] : index
+  %row_raw = kernel.workgroup.id<x> : index
+  %workitem = kernel.workitem.id<x> : index
+  %valid = index.cmp ult, %row_raw, %rows : index
+  %safe_row = scf.select %valid, %row_raw, %c0 : index
+  %row = index.assume %safe_row [lt(%safe_row, %rows)] : index
+  %image = index.div %row, %size : index
+  %y = index.rem %row, %size : index
+
+  %input_global = buffer.assume.memory_space<global> %input : buffer
+  %output_global = buffer.assume.memory_space<global> %output : buffer
+  // Input planes as [B*channels*S] rows of S pixels; output as [B*S*S] pixels
+  // of channels_pad halves.
+  %plane_rows = index.mul %rows, %channels : index
+  %pixel_rows = index.mul %rows, %size : index
+  %input_view = buffer.view %input_global[%c0_offset] : buffer -> view<[%plane_rows]x[%size]xf32>
+  %output_view = buffer.view %output_global[%c0_offset] : buffer -> view<[%pixel_rows]x[%channels_pad]xf16>
+
+  %image_planes = index.mul %image, %channels : index
+  %out_base = index.mul %row, %size : index
+
+  scf.if %valid {
+    scf.for %x0 = [%workitem to %size step %c256] {
+      %x = index.assume %x0 [lt(%x0, %size)] : index
+      %out_row0 = index.add %out_base, %x : index
+      %out_row = index.assume %out_row0 [lt(%out_row0, %pixel_rows)] : index
+      scf.for %c = [%c0 to %channels_pad step %c1] {
+        %present = index.cmp ult, %c, %channels : index
+        %value = scf.if %present -> (f16) {
+          %plane0 = index.add %image_planes, %c : index
+          %plane_row0 = index.mul %plane0, %size : index
+          %in_row0 = index.add %plane_row0, %y : index
+          %in_row = index.assume %in_row0 [lt(%in_row0, %plane_rows)] : index
+          %wide = view.load %input_view[%in_row, %x] : view<[%plane_rows]x[%size]xf32> -> f32
+          %half = scalar.fptrunc %wide : f32 to f16
+          scf.yield %half : f16
+        } else {
+          scf.yield %zero_half : f16
+        }
+        view.store %value, %output_view[%out_row, %c] : f16, view<[%pixel_rows]x[%channels_pad]xf16>
+      }
+    }
+  }
+  kernel.return
+}

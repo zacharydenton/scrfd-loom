@@ -1,0 +1,5 @@
+# Verified with the versions noted; lower bounds, not pins.
+numpy>=2.3            # 2.5.2
+onnx>=1.17            # 1.22.0 -- reads the graph (reference, export)
+onnxruntime>=1.20     # 1.29.0 -- the oracle; the MIGraphX build is the GPU baseline
+opencv-python>=4.10   # 5.0.0  -- letterbox and blobFromImage, exactly as insightface

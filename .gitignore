@@ -1,0 +1,5 @@
+build/
+host/scrfd
+host/loomrun
+__pycache__/
+*.pyc
