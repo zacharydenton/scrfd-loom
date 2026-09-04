@@ -303,3 +303,84 @@ End to end, same box (load 12.7): the native call at batch 16 goes 2.57 -> 2.29 
 (437 img/s), batch 1 3.51 -> 3.03; the Python API 3.25 -> 2.74 at batch 16 and 2.95 ->
 2.63 at batch 32 (mean of calls, best of 3 rounds). The profile keeps its shape: the
 five conv families are 70% of the time, 320^2 relu and 80^2 relu 16% each.
+
+## Lever 4: a 64x128 tile -- wins on the 128-padded layers, loses on the 256-padded
+
+dinov3-loom rejected this shape (its Lever 8), but there the A staging was cheap and
+WMMA the bound; here the per-row gather is the bound, and a tile twice as wide
+gathers each row once for 128 columns instead of twice. Derived from the shipped
+8-wide conv: eight waves with four accumulator fragments each, W staged 128 rows in
+two passes, one LDS allocation with the result stage aliasing the dead A/W stages
+(dinov3's layout). 96 VGPRs. Two LDS sizes: 21504 B (3 workgroups/CU, dinov3's
+optimum) and 15360 B (4/CU).
+
+At batch 4 the 4/CU variant beat the 3/CU one on every layer, and the box's noise
+(the shipped kernel's own c10 time swung 241-311 us between runs) made the rest
+unreadable, so the decisive run is batch 16, best of 7, 4/CU:
+
+| layer | 64x64 | 64x128 | |
+| --- | ---: | ---: | ---: |
+| 88->88 @80^2 | 985.3 us | 894.8 | **1.101x** |
+| 88->88 @40^2 | 238.1 | 219.0 | **1.087x** |
+| 80->80 @80^2 | 896.0 | 824.4 | **1.087x** |
+| 88->88 @80^2 s2 | 272.5 | 260.6 | 1.046x |
+| 56->88 @160^2 s2 | 707.5 | 692.9 | 1.021x |
+| 88->224 @40^2 s2 | 126.8 | 153.7 | 0.825x |
+| 224->224 @20^2 | 289.6 | 355.8 | 0.814x |
+| 224->224 @20^2 | 294.5 | 360.1 | 0.818x |
+
+Clean split: every layer whose padded width is 128 wins, every 256-wide one loses
+(the 64-wide kernel already runs those at 20 TFLOP/s, the best shape in the graph).
+So the policy is "tile 128 exactly when n_size is 128", which is the 80- and
+88-channel families at 80^2, 40^2 and 20^2 -- about a third of the time.
+
+## Lever 5: the 64x64 conv at 4 workgroups/CU -- a wash
+
+Since the winning 64x128 variant also ran at 4/CU (its single LDS allocation, the
+result stage aliasing the dead A/W stages, 15360 B), the same layout on the shipped
+64x64 kernel separates the two effects. Batch 16, best of 7:
+
+| layer | 3/CU (shipped) | 4/CU | |
+| --- | ---: | ---: | ---: |
+| 28->56 @320^2 | 3131.6 us | 3091.1 | 1.013x |
+| 56->56 @160^2 | 1300.7 | 1319.6 | 0.986x |
+| 88->88 @80^2 | 984.9 | 995.7 | 0.989x |
+| 88->88 @40^2 | 237.5 | 235.4 | 1.009x |
+| 224->224 @20^2 | 291.2 | 315.9 | 0.922x |
+
+Noise-level everywhere and a loss on the long-K layer: dinov3-loom's Lever 7 again.
+Occupancy is not the lever; the 128-tile win is the tile. The shipped 64x64 kernel
+keeps its three allocations at 3/CU; the 128-wide one ships in its measured form.
+
+## Lever 6: hipGraph replay of the 57 launches -- no effect
+
+Captured once per batch size into a hipGraph and replayed, against per-launch
+hipModuleLaunchKernel on the same table, interleaved best of 7 whole forwards:
+
+| batch | per-launch | hipGraph |
+| --- | ---: | ---: |
+| 16 | 2.262 ms/img | 2.286 |
+| 1 | 2.603 | 2.599 |
+
+Nothing. The launches are asynchronous and the CPU stays ahead of the queue, so
+the submission gaps the batch-1 profile suggested are not on the critical path.
+Not shipped; the host keeps its plain loop.
+
+## The whole-network A/B is the arbiter
+
+Per-layer A/Bs (tools/ab_conv.py) run one launch hot in a loop; the network runs
+each layer once on a cold cache between fifty-six others. For the 64x128 tile the
+two disagree: 1.02-1.10x per layer, but end to end, two host binaries differing only
+in the tile policy, interleaved, best of 7:
+
+| batch | 64-only | 128 where padded 128 |
+| --- | ---: | ---: |
+| 16 | 2.234 ms/img | 2.322 (0.96x) |
+| 1 | 2.726 | 2.605 (1.05x) |
+
+A longer rerun (best of 9 x 20 forwards) at the same load: batch 16 tile64 2.296 vs
+tile128 2.250 (1.02x), batch 32 2.330 vs 2.301 (1.01x). So at batch throughput the two
+policies are within this box's +-4% noise of each other, and at batch 1 the 128 tile
+keeps its 5%. It ships as the policy for n_size == 128 on that basis -- a neutral-to-
+small win, not the 10% the per-layer numbers promised. Lesson recorded: below about
+5% end to end, nothing is decidable on this machine while the 10-core job runs.

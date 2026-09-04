@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import graph as G
-from export_weights import align, storage_stride, head_groups, CIN_ALIGN, K_ALIGN, COUT_ALIGN
+from export_weights import align, storage_stride, head_groups, tile_for, CIN_ALIGN, K_ALIGN, COUT_ALIGN
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -59,6 +59,7 @@ class Launch:
     n_size: int = 0
     ho: int = 0
     wo: int = 0
+    tile: int = 64            # N tile of a 3x3 conv: tile_for(n_size)
     src_buf: int = -1
     dst_buf: int = -1
     extra_buf: int = -1
@@ -73,7 +74,8 @@ class Launch:
         if self.kind == "matmul":
             geo = f"_{self.h}x{self.w}" if self.variant == "add_resized" else ""
             return f"matmul_{self.variant}_k{self.k_size}_n{self.n_size}{geo}"
-        return (f"conv3x3_{self.variant}_{self.h}x{self.w}_s{self.stride}"
+        wide = "n128_" if self.tile == 128 else ""
+        return (f"conv3x3_{wide}{self.variant}_{self.h}x{self.w}_s{self.stride}"
                 f"_c{self.cin_pad}of{self.cin_stride}_k{self.k_size}_n{self.n_size}")
 
 
@@ -147,7 +149,8 @@ def build_schedule(graph: G.Graph):
             launches.append(Launch(kind, variant, op.name, op.inputs[0], op.output, extra,
                                    stage=f"{kind} {h}x{w} {variant}",
                                    h=h, w=w, stride=op.stride, cin=cin, cin_pad=cin_pad, cin_stride=cs,
-                                   k_size=k_size, cout=op.cout, n_size=n_size, ho=ho, wo=wo))
+                                   k_size=k_size, cout=op.cout, n_size=n_size, ho=ho, wo=wo,
+                                   tile=tile_for(n_size)))
             shapes[op.output] = (ho, wo, n_size)
         elif op.kind in ("maxpool", "avgpool"):
             _, c, h, w = graph.shapes[op.inputs[0]]
@@ -249,7 +252,7 @@ def emit(ordered: list[Launch], shapes, buffers) -> None:
     for l in ordered:
         lines.append(f'  {{{kinds[l.kind]}, {variants[l.variant]}, {stems.index(l.stem)}, "{l.name}", "{l.stage}", '
                      f'{l.h}, {l.w}, {l.stride}, {l.cin_pad}, {l.cin_stride}, {l.k_size}, {l.n_size}, {l.ho}, {l.wo}, '
-                     f'{l.src_buf}, {l.dst_buf}, {l.extra_buf}}},')
+                     f'{l.tile}, {l.src_buf}, {l.dst_buf}, {l.extra_buf}}},')
     lines.append("};")
     head_lines = ", ".join(f'{{"{l.name}", {l.dst_buf}, {l.h}, {l.w}}}' for l in heads)
     lines.append(f"static const scrfd_head scrfd_heads[3] = {{{head_lines}}};")
@@ -283,7 +286,8 @@ def emit(ordered: list[Launch], shapes, buffers) -> None:
                 build.append(f"compile {src} {sym} {l.stem} {ns}.k_size={l.k_size} {ns}.n_size={l.n_size}")
         else:
             suffix = "" if l.variant == "plain" else f"_{l.variant}"
-            ns, src, sym = f"scrfd.conv3x3_f16_wmma{suffix}", f"conv3x3_f16_wmma{suffix}", f"scrfd_conv3x3_f16_wmma{suffix}"
+            base = "conv3x3_n128_f16_wmma" if l.tile == 128 else "conv3x3_f16_wmma"
+            ns, src, sym = f"scrfd.{base}{suffix}", f"{base}{suffix}", f"scrfd_{base}{suffix}"
             build.append(f"compile {src} {sym} {l.stem} {ns}.height={l.h} {ns}.width={l.w} {ns}.stride={l.stride} "
                          f"{ns}.cin_pad={l.cin_pad} {ns}.cin_stride={l.cin_stride} {ns}.k_size={l.k_size} {ns}.n_size={l.n_size}")
     (ROOT / "scripts/kernels.generated").write_text("\n".join(build) + "\n")

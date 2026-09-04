@@ -19,7 +19,8 @@ from pathlib import Path
 
 KERNELS = Path(__file__).resolve().parent.parent / "kernels"
 # (source file, export symbol, config namespace)
-BASES = (("conv3x3_f16_wmma.loom", "scrfd_conv3x3_f16_wmma", "scrfd.conv3x3_f16_wmma"),)
+BASES = (("conv3x3_f16_wmma.loom", "scrfd_conv3x3_f16_wmma", "scrfd.conv3x3_f16_wmma"),
+         ("conv3x3_n128_f16_wmma.loom", "scrfd_conv3x3_n128_f16_wmma", "scrfd.conv3x3_n128_f16_wmma"))
 SOURCE, SYMBOL, NAMESPACE = BASES[0]
 
 LAUNCH = "} launch(%m_size: index, %a: buffer, %w: buffer, %bias: buffer, %c: buffer) {"

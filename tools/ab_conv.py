@@ -8,6 +8,7 @@ timing with the two alternated so both see the same machine. The four layers
 are the ones the profile is made of: 56->56 @160^2, 88->88 @80^2, 224->224
 @20^2 and the 28->56 @320^2 stem conv.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -20,7 +21,8 @@ import reference as R
 from export_weights import pack, storage_stride
 
 BASE = ROOT / "kernels/conv3x3_f16_wmma.loom"
-ROUNDS = 5
+ROUNDS = int(os.environ.get("AB_ROUNDS", 5))
+BATCH = int(os.environ.get("AB_BATCH", 4))   # per-layer batch; small layers need >= 16 to fill 40 CUs
 
 
 def symbol_of(path: Path) -> tuple[str, str, int, int]:
@@ -48,7 +50,7 @@ def main() -> int:
         tmp = Path(tmp)
         print(f"{'layer':<26s} {'base us':>9s} {'TF/s':>5s} {'cand us':>9s} {'TF/s':>5s} {'speedup':>8s}")
         layers = sys.argv[2:] or ["c00", "c02", "c03", "c10", "c27"]
-        for name, batch in ((n, 4) for n in layers):
+        for name, batch in ((n, BATCH) for n in layers):
             op = convs[name]
             # Pack once per (tile, gather width): the weight matrix follows the
             # kernel's Cout and Cin padding. All hold the same values.

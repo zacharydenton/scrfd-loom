@@ -21,6 +21,11 @@ SOURCES = {
     "conv3x3_f16_wmma": ("matmul_bias_f16_wmma_af16_cf16", "dinov3_matmul_bias_f16_wmma_af16_cf16",
                          "dinov3.matmul_bias_f16_wmma_af16_cf16", "scrfd_conv3x3_f16_wmma",
                          "scrfd.conv3x3_f16_wmma", 64),
+    # The 64x128 tile for the layers whose padded width is exactly 128 (tile_for in
+    # tools/export_weights.py): same derivation, then widen_tile.
+    "conv3x3_n128_f16_wmma": ("matmul_bias_f16_wmma_af16_cf16", "dinov3_matmul_bias_f16_wmma_af16_cf16",
+                              "dinov3.matmul_bias_f16_wmma_af16_cf16", "scrfd_conv3x3_n128_f16_wmma",
+                              "scrfd.conv3x3_n128_f16_wmma", 128),
 }
 
 HEADER = """// 3x3 convolution, pad 1, stride 1 or 2, as an implicit GEMM on the {tile}-wide-N WMMA
@@ -170,6 +175,74 @@ def widen_gather(s: str, ns: str) -> str:
     return s[:a] + region + s[b:]
 
 
+def widen_tile(s: str, ns: str) -> str:
+    """64x128 tile: eight waves with four accumulator fragments each, W staged 128
+    rows wide in two passes, one LDS allocation of 15360 bytes with the result
+    stage aliasing the dead A/W stages after the k-loop (4 workgroups/CU). 96
+    VGPRs. Each row is gathered once for 128 columns instead of twice for 64:
+    1.02-1.10x on the 80- and 88-channel layers, 0.82x on the 224-channel ones,
+    which is why tile_for() gives it only n_size == 128 (docs/notes.md, Lever 4)."""
+    def sub(a: str, b: str) -> None:
+        nonlocal s
+        assert a in s, a[:80]
+        s = s.replace(a, b, 1)
+    sub("  %n_tiles = index.div %n_size0, %c64 : index",
+        "  %c128_cfg = index.constant 128 : index\n  %n_tiles = index.div %n_size0, %c128_cfg : index")
+    sub(f"config.decl @{ns}.n_size : %value: index where [range(%value, 64, 8192), mul(%value, 64)]",
+        f"config.decl @{ns}.n_size : %value: index where [range(%value, 128, 8192), mul(%value, 128)]")
+    sub("  %n_size = index.assume %n_size0 [range(%n_size0, 64, 8192), mul(%n_size0, 64)] : index",
+        "  %n_size = index.assume %n_size0 [range(%n_size0, 128, 8192), mul(%n_size0, 128)] : index")
+    sub("  %c64 = index.constant 64 : index\n  %c256 = index.constant 256 : index\n  %c0_offset = index.constant 0 : offset\n",
+        "  %c48 = index.constant 48 : index\n  %c64 = index.constant 64 : index\n  %c128 = index.constant 128 : index\n  %c256 = index.constant 256 : index\n  %c0_offset = index.constant 0 : offset\n")
+    sub("  %a_stage_bytes = index.constant 5120 : offset\n  %w_stage_bytes = index.constant 5120 : offset\n  %result_stage_bytes = index.constant 8192 : offset\n",
+        "  %lds_bytes = index.constant 15360 : offset\n  %w_stage_offset = index.constant 5120 : offset\n")
+    sub("""  %a_stage = buffer.alloca<workgroup> align(16) %a_stage_bytes : buffer
+  %w_stage = buffer.alloca<workgroup> align(16) %w_stage_bytes : buffer
+  %result_stage = buffer.alloca<workgroup> align(16) %result_stage_bytes : buffer
+  %a_stage_view = buffer.view %a_stage[%c0_offset] : buffer -> view<64x40xf16>
+  %w_stage_view = buffer.view %w_stage[%c0_offset] : buffer -> view<64x40xf16>""",
+        """  // One allocation: A at 0, W at 5120, and after the k-loop the eight waves'
+  // 16x16 f32 result tiles over the dead stages.
+  %lds = buffer.alloca<workgroup> align(16) %lds_bytes : buffer
+  %a_stage_view = buffer.view %lds[%c0_offset] : buffer -> view<64x40xf16>
+  %w_stage_view = buffer.view %lds[%w_stage_offset] : buffer -> view<128x40xf16>""")
+    sub("  %w_fragment_view = buffer.view %w_stage[%c0_offset] : buffer -> view<32x64xf16, %w_fragment_layout>",
+        "  %w_fragment_view = buffer.view %lds[%w_stage_offset] : buffer -> view<32x128xf16, %w_fragment_layout>")
+    sub("  %result_view = buffer.view %result_stage[%wave_result_offset] : buffer -> view<16x16xf32>",
+        "  %result_view = buffer.view %lds[%wave_result_offset] : buffer -> view<16x16xf32>")
+    sub("  %wave_col = index.mul %wave_n, %c32 : index\n  %wave_col1 = index.add %wave_col, %c16 : index\n",
+        "  %wave_col = index.mul %wave_n, %c64 : index\n  %wave_col1 = index.add %wave_col, %c16 : index\n  %wave_col2 = index.add %wave_col, %c32 : index\n  %wave_col3 = index.add %wave_col, %c48 : index\n")
+    sub("  %base_n = index.mul %tile_n_id, %c64 : index", "  %base_n = index.mul %tile_n_id, %c128 : index")
+    sub("  %acc_init1 = vector.fragment<init> %zero_f32x8 shape [%m, %n] : vector<8xf32>\n",
+        "  %acc_init1 = vector.fragment<init> %zero_f32x8 shape [%m, %n] : vector<8xf32>\n  %acc_init2 = vector.fragment<init> %zero_f32x8 shape [%m, %n] : vector<8xf32>\n  %acc_init3 = vector.fragment<init> %zero_f32x8 shape [%m, %n] : vector<8xf32>\n")
+    sub("  %acc0, %acc1 = scf.for %k_base = [%c0 to %k_size step %c32](%run0 = %acc_init0 : vector<8xf32>, %run1 = %acc_init1 : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>) {",
+        "  %acc0, %acc1, %acc2, %acc3 = scf.for %k_base = [%c0 to %k_size step %c32](%run0 = %acc_init0 : vector<8xf32>, %run1 = %acc_init1 : vector<8xf32>, %run2 = %acc_init2 : vector<8xf32>, %run3 = %acc_init3 : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {")
+    m = re.search(r"^( *)%source_n = index\.add %base_n, %row : index\n\1%w_values = vector\.load %w_view\[%source_n, %source_k\] : view<\[%n_size\]x\[%k_size\]xf16> -> vector<8xf16>\n\1vector\.store %w_values, %w_stage_view\[%row, %load_k\] : vector<8xf16>, view<64x40xf16>\n", s, re.M)
+    assert m, "W staging block"
+    ind = m.group(1)
+    s = s[:m.start()] + f"""{ind}scf.for %w_half = [%c0 to %c2 step %c1] {{
+{ind}  %w_row_offset = index.mul %w_half, %c64 : index
+{ind}  %w_row = index.add %load_row, %w_row_offset : index
+{ind}  %source_n = index.add %base_n, %w_row : index
+{ind}  %w_values = vector.load %w_view[%source_n, %source_k] : view<[%n_size]x[%k_size]xf16> -> vector<8xf16>
+{ind}  vector.store %w_values, %w_stage_view[%w_row, %load_k] : vector<8xf16>, view<128x40xf16>
+{ind}}}
+""" + s[m.end():]
+    sub("    %next0, %next1 = scf.for %k_half = [%c0 to %c32 step %c16](%half0 = %run0 : vector<8xf32>, %half1 = %run1 : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>) unroll {",
+        "    %next0, %next1, %next2, %next3 = scf.for %k_half = [%c0 to %c32 step %c16](%half0 = %run0 : vector<8xf32>, %half1 = %run1 : vector<8xf32>, %half2 = %run2 : vector<8xf32>, %half3 = %run3 : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) unroll {")
+    s = s.replace("view<32x64xf16, %w_fragment_layout>", "view<32x128xf16, %w_fragment_layout>")
+    sub("      %rhs1 = vector.fragment.load<rhs> %w_fragment_view[%k_half, %wave_col1] shape [%k, %n] : view<32x128xf16, %w_fragment_layout> -> vector<16xf16>\n",
+        "      %rhs1 = vector.fragment.load<rhs> %w_fragment_view[%k_half, %wave_col1] shape [%k, %n] : view<32x128xf16, %w_fragment_layout> -> vector<16xf16>\n"
+        "      %rhs2 = vector.fragment.load<rhs> %w_fragment_view[%k_half, %wave_col2] shape [%k, %n] : view<32x128xf16, %w_fragment_layout> -> vector<16xf16>\n"
+        "      %rhs3 = vector.fragment.load<rhs> %w_fragment_view[%k_half, %wave_col3] shape [%k, %n] : view<32x128xf16, %w_fragment_layout> -> vector<16xf16>\n")
+    sub("      %out1 = vector.mma %lhs, %rhs1, %half1 : vector<16xf16>, vector<16xf16>, vector<8xf32>\n      scf.yield %out0, %out1 : vector<8xf32>, vector<8xf32>\n",
+        "      %out1 = vector.mma %lhs, %rhs1, %half1 : vector<16xf16>, vector<16xf16>, vector<8xf32>\n      %out2 = vector.mma %lhs, %rhs2, %half2 : vector<16xf16>, vector<16xf16>, vector<8xf32>\n      %out3 = vector.mma %lhs, %rhs3, %half3 : vector<16xf16>, vector<16xf16>, vector<8xf32>\n      scf.yield %out0, %out1, %out2, %out3 : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>\n")
+    sub("    scf.yield %next0, %next1 : vector<8xf32>, vector<8xf32>\n", "    scf.yield %next0, %next1, %next2, %next3 : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>\n")
+    sub("  scf.for %fragment = [%c0 to %c2 step %c1] {\n    %is_second = index.cmp eq, %fragment, %c1 : index\n    %chosen = scf.select %is_second, %acc1, %acc0 : vector<8xf32>\n",
+        "  scf.for %fragment = [%c0 to %c4 step %c1] {\n    %is1 = index.cmp eq, %fragment, %c1 : index\n    %is2 = index.cmp eq, %fragment, %c2 : index\n    %is3 = index.cmp eq, %fragment, %c3 : index\n    %pick01 = scf.select %is1, %acc1, %acc0 : vector<8xf32>\n    %pick012 = scf.select %is2, %acc2, %pick01 : vector<8xf32>\n    %chosen = scf.select %is3, %acc3, %pick012 : vector<8xf32>\n")
+    return s
+
+
 def derive(target: str) -> str:
     src_stem, src_sym, src_ns, sym, ns, tile = SOURCES[target]
     s = (KERNELS / f"{src_stem}.loom").read_text()
@@ -236,7 +309,8 @@ config.decl @{ns}.k_size : %value: index where [range(%value, 32, 16384), mul(%v
       } else {
         scf.yield %zero_f16x4 : vector<4xf16>
       }""", GATHER)
-    return widen_gather(HEADER.format(tile=tile, source=src_stem) + s, ns)
+    s = widen_gather(HEADER.format(tile=tile, source=src_stem) + s, ns)
+    return widen_tile(s, ns) if tile == 128 else s
 
 
 def main() -> None:

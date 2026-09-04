@@ -33,6 +33,16 @@ def align(n: int, a: int) -> int:
     return (n + a - 1) // a * a
 
 
+def tile_for(n_size: int) -> int:
+    """N tile of a 3x3 conv with this padded output width. The 64x128 tile gathers
+    each row once for 128 columns and measured 1.02-1.10x on the 80- and 88-channel
+    layers but 0.82x on the 224-channel ones (docs/notes.md, Lever 4), so it is
+    used exactly when the padded width is 128. Either tile pads Cout the same way,
+    so nothing about the tensors changes with this choice -- only which kernel
+    runs and how wide its grid is."""
+    return 128 if n_size == 128 else 64
+
+
 def storage_stride(channels: int) -> int:
     """Physical channel stride of an NHWC activation: every conv writes its
     Cout_pad (64-aligned) columns, so that is the width its consumers see; the
