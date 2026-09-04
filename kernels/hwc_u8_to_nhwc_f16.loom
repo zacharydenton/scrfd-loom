@@ -1,12 +1,12 @@
 // The stem's input conversion. The input is the letterboxed BGR uint8 image
 // insightface's detect() builds, [B*S*S] pixels of 3 bytes; the output is NHWC
-// f16 with the channel count padded to 4, RGB, normalised -- blobFromImage's
-// (x - 127.5) / 128 with swapRB -- so every later gather of a vector<4xf16>
-// stays inside one tap. Doing the normalisation here means the host uploads
+// f16 with the channel count padded to 8, RGB, normalised -- blobFromImage's
+// (x - 127.5) / 128 with swapRB -- so the stem conv's 8-wide gather reads one
+// aligned packet per pixel per tap. Doing the normalisation here means the host uploads
 // bytes (1.2 MB per image) instead of a normalised f32 blob four times larger,
 // and never builds that blob at all.
 //
-//   out[p, c] = c < 3 ? (in[p, 2 - c] - 127.5) / 128 : 0
+//   out[p, c] = c < 3 ? (in[p, 2 - c] - 127.5) / 128 : 0   for c < 8
 //
 // One workgroup per image row (b, y); 256 workitems stride the S pixels.
 // Bandwidth-trivial, so scalar loads and stores.
@@ -26,7 +26,7 @@ kernel.def target(@scrfd_hwc_u8_to_nhwc_gfx11) export("scrfd_hwc_u8_to_nhwc_f16"
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
   %c3 = index.constant 3 : index
-  %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
   %c256 = index.constant 256 : index
   %c0_offset = index.constant 0 : offset
   %zero_half = scalar.constant 0.0 : f16
@@ -46,7 +46,7 @@ kernel.def target(@scrfd_hwc_u8_to_nhwc_gfx11) export("scrfd_hwc_u8_to_nhwc_f16"
   %output_global = buffer.assume.memory_space<global> %output : buffer
   %pixel_rows = index.mul %rows, %size : index
   %input_view = buffer.view %input_global[%c0_offset] : buffer -> view<[%pixel_rows]x[%c3]xi8>
-  %output_view = buffer.view %output_global[%c0_offset] : buffer -> view<[%pixel_rows]x[%c4]xf16>
+  %output_view = buffer.view %output_global[%c0_offset] : buffer -> view<[%pixel_rows]x[%c8]xf16>
 
   %out_base = index.mul %row, %size : index
 
@@ -75,11 +75,13 @@ kernel.def target(@scrfd_hwc_u8_to_nhwc_gfx11) export("scrfd_hwc_u8_to_nhwc_f16"
       %g_half = scalar.fptrunc %g_scaled : f32 to f16
       %r_half = scalar.fptrunc %r_scaled : f32 to f16
 
-      // swapRB: the output row is R, G, B, 0.
-      view.store %r_half, %output_view[%pixel, %c0] : f16, view<[%pixel_rows]x[%c4]xf16>
-      view.store %g_half, %output_view[%pixel, %c1] : f16, view<[%pixel_rows]x[%c4]xf16>
-      view.store %b_half, %output_view[%pixel, %c2] : f16, view<[%pixel_rows]x[%c4]xf16>
-      view.store %zero_half, %output_view[%pixel, %c3] : f16, view<[%pixel_rows]x[%c4]xf16>
+      // swapRB: the output row is R, G, B, then five zeros.
+      view.store %r_half, %output_view[%pixel, %c0] : f16, view<[%pixel_rows]x[%c8]xf16>
+      view.store %g_half, %output_view[%pixel, %c1] : f16, view<[%pixel_rows]x[%c8]xf16>
+      view.store %b_half, %output_view[%pixel, %c2] : f16, view<[%pixel_rows]x[%c8]xf16>
+      scf.for %pad = [%c3 to %c8 step %c1] {
+        view.store %zero_half, %output_view[%pixel, %pad] : f16, view<[%pixel_rows]x[%c8]xf16>
+      }
     }
   }
   kernel.return

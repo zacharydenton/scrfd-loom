@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import graph as G
 
 ROOT = Path(__file__).resolve().parent.parent
-CIN_ALIGN, K_ALIGN, COUT_ALIGN = 4, 32, 64
+CIN_ALIGN, K_ALIGN, COUT_ALIGN = 8, 32, 64   # the conv gathers vector<8xf16>
 
 
 def align(n: int, a: int) -> int:
@@ -36,11 +36,12 @@ def align(n: int, a: int) -> int:
 def storage_stride(channels: int) -> int:
     """Physical channel stride of an NHWC activation: every conv writes its
     Cout_pad (64-aligned) columns, so that is the width its consumers see; the
-    converted stem image is the one 4-wide tensor."""
-    return 4 if channels <= 4 else align(channels, COUT_ALIGN)
+    converted stem image is the one 8-wide tensor."""
+    return 8 if channels <= 8 else align(channels, COUT_ALIGN)
 
 
-def pack(weight: np.ndarray, bias: np.ndarray, cout_align: int | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
+def pack(weight: np.ndarray, bias: np.ndarray, cout_align: int | None = None,
+         cin_align: int = CIN_ALIGN) -> tuple[np.ndarray, np.ndarray, dict]:
     """[Cout][Cin][k][k], [Cout] -> W16[Cout_pad][K_pad], b32[Cout_pad], shape info.
 
     cout_align (default 64) lets the A/B harness pack the same weights for an
@@ -51,7 +52,7 @@ def pack(weight: np.ndarray, bias: np.ndarray, cout_align: int | None = None) ->
     # A 3x3 conv gathers c < cin_pad (4-aligned) inside rows of the input's
     # storage stride. A 1x1 conv is the plain matmul, whose A *is* the input
     # tensor, so its K must equal that stride and the weights are zero beyond cin.
-    cin_pad = align(cin, CIN_ALIGN) if k == 3 else storage_stride(cin)
+    cin_pad = align(cin, cin_align) if k == 3 else storage_stride(cin)
     k_pad = align(k * k * cin_pad, K_ALIGN)
     w = np.zeros((cout_pad, k * k, cin_pad), np.float32)
     w[:cout, :, :cin] = weight.transpose(0, 2, 3, 1).reshape(cout, k * k, cin)   # [co][dy*k+dx][c]

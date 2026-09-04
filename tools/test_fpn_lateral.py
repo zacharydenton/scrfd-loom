@@ -18,7 +18,9 @@ def main() -> int:
     rng = np.random.default_rng(31)
     with workdir() as tmp:
         tmp = Path(tmp)
-        for name, batch, cin, cout, h, w in (("tiny", 2, 8, 64, 4, 6), ("80^2 lateral", 2, 88, 56, 80, 80),
+        # cin >= 9: a narrower tensor is stored 8 wide (only the stem image is), and a
+        # 1x1 conv's K must be the row stride, a multiple of 32.
+        for name, batch, cin, cout, h, w in (("tiny", 2, 16, 64, 4, 6), ("80^2 lateral", 2, 88, 56, 80, 80),
                                             ("40^2 lateral", 2, 88, 56, 40, 40)):
             weight = (rng.standard_normal((cout, cin, 1, 1)) / np.sqrt(cin)).astype(np.float32)
             bias = (rng.standard_normal(cout) * 0.1).astype(np.float32)

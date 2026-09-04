@@ -1,5 +1,5 @@
 """hwc_u8_to_nhwc_f16 vs NumPy: the letterboxed BGR uint8 image -> normalised RGB
-NHWC f16 padded to 4 channels, bit-exact against blobFromImage's arithmetic."""
+NHWC f16 padded to 8 channels, bit-exact against blobFromImage's arithmetic."""
 import sys
 from pathlib import Path
 
@@ -14,10 +14,10 @@ SYMBOL = "scrfd_hwc_u8_to_nhwc_f16"
 
 def expected(image: np.ndarray) -> np.ndarray:
     """(x - 127.5) / 128 in f32 with swapRB, truncated to f16, as blobFromImage + the old
-    f32 converter produced it; the fourth channel is zero."""
+    f32 converter produced it; channels 3..7 are zero."""
     batch, size = image.shape[0], image.shape[1]
     rgb = image[..., ::-1].astype(np.float32)
-    out = np.zeros((batch, size, size, 4), np.float16)
+    out = np.zeros((batch, size, size, 8), np.float16)
     out[..., :3] = ((rgb - np.float32(127.5)) * np.float32(1 / 128)).astype(np.float16)
     return out
 
@@ -36,9 +36,9 @@ def main() -> int:
             rows = batch * size
             (out,), timing = launch(hsaco, SYMBOL, (rows, 1, 1), (256, 1, 1),
                                     [("i32", rows), ("in_u8", image),
-                                     ("out_f16", ((batch * size * size, 4), np.float16))],
+                                     ("out_f16", ((batch * size * size, 8), np.float16))],
                                     tmp, repeat=20)
-            want = expected(image).reshape(-1, 4)
+            want = expected(image).reshape(-1, 8)
             ok &= report(f"size={size} batch={batch} ({timing['per_launch_us']:7.2f} us, "
                          f"{batch * size * size * 3 / (timing['per_launch_us'] * 1e-6) / 1e9:5.1f} GB/s in)",
                          out, want, atol=0, rtol=0)

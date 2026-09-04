@@ -272,3 +272,34 @@ end-to-end detections are unchanged. The box is noisy: batch 17 measured 2.83 an
 interleaved benchmark (mean of 6 calls, best of 3 rounds) reads 3.25 at batch 16 and
 2.95 at batch 32 vs MIGraphX's 4.96 network-only. The floor is the 2.55 ms/img of GPU
 time; the next lever for the API is inside the kernels, not around them.
+
+## Lever 3: an 8-wide gather -- won on every layer
+
+The gather was the bound, and each lane was doing it as two rows x vector<4xf16>
+per k-step (the matmul's staging map: two passes of 32 rows x 8 packets). Every Cin
+in the graph but the stem's 3 and the first block's 28 is a multiple of 8, so an
+8-wide packet never straddles a tap if Cin_pad and Cin_stride are 8-aligned: one
+pass of 64 rows x 4 packets, half the loads, half the address arithmetic, one
+hoisted row per lane instead of two. 72 VGPRs against 80; LDS unchanged. The price
+is padding: 28 -> 32 on the 320^2 layers (K 256 -> 288) and 3 -> 8 on the stem
+(K 64 -> 96, and the converter writes 8-wide rows).
+
+Interleaved best-of-5, batch 4, real weights, all correct:
+
+| layer | 4-wide | 8-wide | |
+| --- | ---: | ---: | ---: |
+| 3->28 @640^2 s2 (stem) | 394.6 us | 394.6 | 1.000x |
+| 28->56 @320^2 (K +12.5%) | 898.9 | 779.7 | **1.153x** |
+| 56->56 @160^2 | 366.0 | 306.3 | **1.195x** |
+| 88->88 @80^2 | 269.7 | 238.0 | **1.133x** |
+| 224->224 @20^2 | 93.1 | 76.5 | **1.218x** |
+
+The stem is bandwidth-bound at 1.6 TFLOP/s either way, so its extra K is free.
+Folded into the generator (`widen_gather` in tools/gen_conv.py), so the conv and
+its variants all carry it; CIN_ALIGN is 8 in one place and the storage stride, the
+converter, the launch table and the packer follow.
+
+End to end, same box (load 12.7): the native call at batch 16 goes 2.57 -> 2.29 ms/img
+(437 img/s), batch 1 3.51 -> 3.03; the Python API 3.25 -> 2.74 at batch 16 and 2.95 ->
+2.63 at batch 32 (mean of calls, best of 3 rounds). The profile keeps its shape: the
+five conv families are 70% of the time, 320^2 relu and 80^2 relu 16% each.

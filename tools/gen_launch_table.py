@@ -102,7 +102,7 @@ def build_schedule(graph: G.Graph):
     # the converted input
     _, _, H, W = graph.shapes[graph.input]
     conv_in = "nhwc_input"
-    shapes[conv_in] = (H, W, 4)
+    shapes[conv_in] = (H, W, storage_stride(graph.shapes[graph.input][1]))
     launches.append(Launch("convert", "", "convert", graph.input, conv_in, stage="convert",
                            h=H, w=W, cin=3, cin_pad=4, cin_stride=4, ho=H, wo=W))
     alias[graph.input] = conv_in
