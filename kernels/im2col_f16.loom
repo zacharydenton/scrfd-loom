@@ -1,0 +1,143 @@
+// Explicit im2col for a 3x3, pad-1 convolution over NHWC f16, and the reference
+// implementation of the gather the implicit-GEMM conv inlines into its A-staging
+// loop: the address arithmetic here is the address arithmetic there.
+//
+//   cols[(b*Ho + yo)*Wo + xo, tap*Cin_pad + c] = in[(b*H + yi)*W + xi, c]
+//     with tap = dy*3 + dx, yi = yo*stride + dy - 1, xi = xo*stride + dx - 1,
+//     zero when (yi, xi) is outside the image or k >= 9*Cin_pad.
+//
+// Bounds: yi is never formed as a possibly-negative value. y0 = yo*stride + dy is
+// computed first (>= 0), the tap is taken only when 1 <= y0 <= H, and yi = y0 - 1
+// is proven < H inside that branch -- the clamp-before-subtract idiom the prover
+// accepts. Same for x. This is a vector.load path, so index.assume is legal.
+//
+// One workgroup per output pixel row (b, yo); 256 workitems cover the Wo pixels
+// times the K_pad/4 vector slots. Cin_pad is a multiple of 4 by export, so a
+// vector<4xf16> never straddles a tap.
+
+amdgpu.target<gfx11-generic> @scrfd_im2col_gfx11 {subgroup_size = 32}
+
+// Input height/width and stride; output is (H/stride) x (W/stride) with pad 1.
+config.decl @scrfd.im2col_f16.height : %value: index where [range(%value, 2, 4096), mul(%value, 2)]
+
+config.decl @scrfd.im2col_f16.width : %value: index where [range(%value, 2, 4096), mul(%value, 2)]
+
+config.decl @scrfd.im2col_f16.stride : %value: index where [range(%value, 1, 2)]
+
+config.decl @scrfd.im2col_f16.cin_pad : %value: index where [range(%value, 4, 1024), mul(%value, 4)]
+
+config.decl @scrfd.im2col_f16.k_pad : %value: index where [range(%value, 32, 16384), mul(%value, 32)]
+
+kernel.def target(@scrfd_im2col_gfx11) export("scrfd_im2col_f16") @scrfd_im2col_f16(%out_rows_total: index) {
+  %c1 = index.constant 1 : index
+  %c256 = index.constant 256 : index
+  %width = config.get @scrfd.im2col_f16.width : index
+  %stride = config.get @scrfd.im2col_f16.stride : index
+  %wo = index.div %width, %stride : index
+  %pixel_rows = index.div %out_rows_total, %wo : index
+  kernel.launch.config workgroups(%pixel_rows, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
+} launch(%out_rows_total: index, %input: buffer, %cols: buffer) {
+  %height = config.get @scrfd.im2col_f16.height : index
+  %width = config.get @scrfd.im2col_f16.width : index
+  %stride = config.get @scrfd.im2col_f16.stride : index
+  %cin_pad = config.get @scrfd.im2col_f16.cin_pad : index
+  %k_pad = config.get @scrfd.im2col_f16.k_pad : index
+
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c3 = index.constant 3 : index
+  %c4 = index.constant 4 : index
+  %c9 = index.constant 9 : index
+  %c256 = index.constant 256 : index
+  %c0_offset = index.constant 0 : offset
+  %zero4 = vector.constant 0.0 : vector<4xf16>
+
+  %ho = index.div %height, %stride : index
+  %wo = index.div %width, %stride : index
+  %k_real = index.mul %cin_pad, %c9 : index
+  %slots = index.div %k_pad, %c4 : index
+  // vector<4xf16> slots per output row
+  // A vector<4xf16> at column c reaches c+3, so the provable bound the loads
+  // and stores need is c <= width-4, together with c being a multiple of 4.
+  // `rem` alone does not tell the prover either; both are stated below.
+  %c_limit = index.sub %cin_pad, %c4 : index
+  %k_limit = index.sub %k_pad, %c4 : index
+  %work = index.mul %wo, %slots : index
+  // (pixel, slot) pairs per workgroup
+  // M = B*Ho*Wo is a launch argument: bounded in the body, never by `where`.
+  %m_total = index.assume %out_rows_total [range(%out_rows_total, 1, 16777216), mul(%out_rows_total, 2)] : index
+  %pixel_rows = index.div %m_total, %wo : index
+  // B*Ho
+  %in_rows = index.mul %pixel_rows, %stride : index
+  %in_rows_total = index.mul %in_rows, %width : index
+
+  %prow_raw = kernel.workgroup.id<x> : index
+  %workitem = kernel.workitem.id<x> : index
+  %valid = index.cmp ult, %prow_raw, %pixel_rows : index
+  %safe_prow = scf.select %valid, %prow_raw, %c0 : index
+  %prow = index.assume %safe_prow [lt(%safe_prow, %pixel_rows)] : index
+  %image = index.div %prow, %ho : index
+  %yo = index.rem %prow, %ho : index
+  %image_rows = index.mul %image, %height : index
+  %m_base = index.mul %prow, %wo : index
+
+  %input_global = buffer.assume.memory_space<global> %input : buffer
+  %cols_global = buffer.assume.memory_space<global> %cols : buffer
+  %input_aligned = buffer.assume.alignment %input_global {minimum_alignment = 8} : buffer
+  %cols_aligned = buffer.assume.alignment %cols_global {minimum_alignment = 8} : buffer
+  %input_view = buffer.view %input_aligned[%c0_offset] : buffer -> view<[%in_rows_total]x[%cin_pad]xf16>
+  %cols_view = buffer.view %cols_aligned[%c0_offset] : buffer -> view<[%m_total]x[%k_pad]xf16>
+
+  scf.if %valid {
+    scf.for %item = [%workitem to %work step %c256] {
+      %xo = index.div %item, %slots : index
+      %slot = index.rem %item, %slots : index
+      %k = index.mul %slot, %c4 : index
+      %m0 = index.add %m_base, %xo : index
+      %m = index.assume %m0 [lt(%m0, %m_total)] : index
+      %k_col = index.assume %k [le(%k, %k_limit), mul(%k, 4)] : index
+
+      %in_k = index.cmp ult, %k, %k_real : index
+      %values = scf.if %in_k -> (vector<4xf16>) {
+        %tap = index.div %k, %cin_pad : index
+        %c = index.rem %k, %cin_pad : index
+        %dy = index.div %tap, %c3 : index
+        %dx = index.rem %tap, %c3 : index
+        // Clamp before subtracting: y0 = yo*stride + dy is never negative, the
+        // tap is inside the image iff 1 <= y0 <= H, and only then is yi = y0-1
+        // formed -- with its bound stated inside the branch that proves it.
+        %ys = index.mul %yo, %stride : index
+        %y0 = index.add %ys, %dy : index
+        %xs = index.mul %xo, %stride : index
+        %x0 = index.add %xs, %dx : index
+        %y_low = index.cmp uge, %y0, %c1 : index
+        %y_high = index.cmp ule, %y0, %height : index
+        %x_low = index.cmp uge, %x0, %c1 : index
+        %x_high = index.cmp ule, %x0, %width : index
+        %y_ok = scalar.andi %y_low, %y_high : i1
+        %x_ok = scalar.andi %x_low, %x_high : i1
+        %inside = scalar.andi %y_ok, %x_ok : i1
+        %loaded = scf.if %inside -> (vector<4xf16>) {
+          %yi0 = index.sub %y0, %c1 : index
+          %xi0 = index.sub %x0, %c1 : index
+          %yi = index.assume %yi0 [lt(%yi0, %height)] : index
+          %xi = index.assume %xi0 [lt(%xi0, %width)] : index
+          %row_y0 = index.add %image_rows, %yi : index
+          %row_yw = index.mul %row_y0, %width : index
+          %in_row0 = index.add %row_yw, %xi : index
+          %in_row = index.assume %in_row0 [lt(%in_row0, %in_rows_total)] : index
+          %c_col = index.assume %c [le(%c, %c_limit), mul(%c, 4)] : index
+          %v = vector.load %input_view[%in_row, %c_col] : view<[%in_rows_total]x[%cin_pad]xf16> -> vector<4xf16>
+          scf.yield %v : vector<4xf16>
+        } else {
+          scf.yield %zero4 : vector<4xf16>
+        }
+        scf.yield %loaded : vector<4xf16>
+      } else {
+        scf.yield %zero4 : vector<4xf16>
+      }
+      vector.store %values, %cols_view[%m, %k_col] : vector<4xf16>, view<[%m_total]x[%k_pad]xf16>
+    }
+  }
+  kernel.return
+}

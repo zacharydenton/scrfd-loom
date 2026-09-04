@@ -49,3 +49,14 @@ which is insightface's anchor-major row order once NHWC is reshaped. 52 matrices
 
 - `nchw_to_nhwc_f16`: the blob -> NHWC f16 with a zero 4th channel. Exact; 51 us for
   two 640^2 images, 191 GB/s -- bandwidth-bound, as it should be.
+- `im2col_f16`: the explicit gather, and the reference for the implicit one --
+  identical address arithmetic. Exact against NumPy at a tiny shape covering every
+  halo case and at 640^2/160^2/80^2, stride 1 and 2. First prover rejection of this
+  repo: a `vector<4xf16>` at channel `c = k % Cin_pad` needs `c + 4 <= Cin_pad`, and
+  `rem` alone does not tell the subrange prover that `c` is a multiple of 4 -- it
+  passed at Cin_pad 4 only because `c` folds to 0 there. Stating `[le(c, Cin_pad-4),
+  mul(c, 4)]` on the load path (legal: no fragment op downstream) fixes it.
+- **Day-one conv** = im2col + the af16_cf16 WMMA matmul, real weights, vs float64:
+  cosine 0.99999996 on c00/c03/c10/c27. The matmul runs 5.7-11.9 TFLOP/s on padded
+  K, and materialising the columns costs 30-55% of the matmul's time on top. That
+  overhead is what the implicit-GEMM conv removes; this path stays as the fallback.
