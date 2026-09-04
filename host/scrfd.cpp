@@ -34,6 +34,7 @@ struct scrfd_launch {
     int kind, variant, kernel;
     const char *name, *stage;
     int h, w, stride, cin_pad, cin_stride, k_size, n_size, ho, wo;
+    int tile;                       // N tile width: 64, or 32 for the narrow conv
     int src_buf, dst_buf, extra_buf;
 };
 struct scrfd_head { const char *name; int buf, h, w; };
@@ -127,9 +128,11 @@ struct Stage {
 const char *symbol_for(const scrfd_launch &l) {
     static const char *conv[] = {"scrfd_conv3x3_f16_wmma", "scrfd_conv3x3_f16_wmma_relu",
                                  "scrfd_conv3x3_f16_wmma_add", "scrfd_conv3x3_f16_wmma_relu_add"};
+    static const char *narrow[] = {"scrfd_conv3x3_narrow_f16_wmma", "scrfd_conv3x3_narrow_f16_wmma_relu",
+                                   "scrfd_conv3x3_narrow_f16_wmma_add", "scrfd_conv3x3_narrow_f16_wmma_relu_add"};
     switch (l.kind) {
     case 0: return "scrfd_nchw_to_nhwc_f16";
-    case 1: return conv[l.variant];
+    case 1: return l.tile == 32 ? narrow[l.variant] : conv[l.variant];
     case 2: return l.variant == 4 ? "scrfd_matmul_add_resized_f16_wmma" : "dinov3_matmul_bias_f16_wmma_af16_cf16";
     default: return "scrfd_pool2_f16";
     }
@@ -233,7 +236,7 @@ public:
                 args.pointer((char *)weights32_ + bias_off_[i] * 4);
                 args.pointer(dst);
                 if (l.extra_buf >= 0) args.pointer(buffers_[l.extra_buf]);
-                gx = l.n_size / TILE; gy = (m + TILE - 1) / TILE;
+                gx = l.n_size / l.tile; gy = (m + TILE - 1) / TILE;   // M tile is always 64
             }
             void *config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, args.bytes,
                               HIP_LAUNCH_PARAM_BUFFER_SIZE, &args.size, HIP_LAUNCH_PARAM_END};

@@ -125,3 +125,49 @@ four distinct images.
 **First throughput** (10-core CPU job resident): batch 1 **303 img/s, 3.30 ms**;
 batch 32 374 img/s, 2.67 ms -- 10 TFLOP/s effective. MIGraphX: 5.07 ms, 5.3 TFLOP/s,
 batch 1 only. So batch 1 is already 1.54x MIGraphX, before any tuning.
+
+## Benchmark, first tuning round
+
+Interleaved with onnxruntime+MIGraphX, best of 3, CPU load average 10 (the 10-core
+job again). MIGraphX reproduced its earlier figure (4.92 vs 5.07 ms).
+
+| configuration | img/s | ms/img | vs MIGraphX |
+| --- | ---: | ---: | ---: |
+| loom, batch 32 | 371.8 | 2.69 | **1.83x** |
+| loom, batch 8 | 368.2 | 2.72 | 1.81x |
+| loom, batch 1 | 286.6 | 3.49 | **1.41x** |
+| onnxruntime MIGraphX, batch 1 | 203.2 | 4.92 | 1.00x |
+
+That is the untuned detector: every conv still redoes its output-pixel arithmetic on
+every staging load.
+
+## Lever 1: hoist the gather's row decomposition -- won on every layer
+
+Each workitem stages the same two output pixels (tile rows `load_row` and
+`load_row+32`) for every k, but the gather recomputed `(image, yo, xo)` from the row
+index -- two `div` and two `rem` by constants -- on every load, plus the tap
+arithmetic. Decomposing both pixels once before the k-loop and selecting inside
+leaves only the per-k tap/channel work. 80 VGPRs against 72; still 3 workgroups/CU.
+
+Interleaved best-of-5, batch 4, real weights, correct on all four:
+
+| layer | base | hoisted | |
+| --- | ---: | ---: | ---: |
+| 28->56 @320^2 (stem) | 12.2 TFLOP/s | 12.8 | 1.048x |
+| 56->56 @160^2 | 15.2 | 16.0 | 1.052x |
+| 88->88 @80^2 | 12.5 | 13.3 | 1.068x |
+| 224->224 @20^2 | 14.3 | 15.7 | **1.098x** |
+
+Consistent sign, larger where K is longer (more loads per output). Folded into the
+generator so both tiles get it.
+
+## The N-tile policy lives in one place
+
+A layer computed on the 32-wide tile writes align32(Cout) columns instead of
+align64(Cout), so its consumers' row stride, the 1x1 convs' K, the weight padding and
+the host's grid all change with it. `tile_for(cout)` in tools/export_weights.py
+decides, `storage_stride()` follows from it, the schedule records each tensor's
+produced width and asserts the consumer's stride matches, and the launch table
+carries the tile. With the policy empty the table regenerates byte-identical apart
+from the new field. `kernels/conv3x3_narrow_f16_wmma` (+ variants) is the 64x32 tile
+derived from dinov3-loom's narrow matmul by the same generator; 64 VGPRs, 15872 B.

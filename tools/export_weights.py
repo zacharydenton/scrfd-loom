@@ -33,17 +33,33 @@ def align(n: int, a: int) -> int:
     return (n + a - 1) // a * a
 
 
+# Which convs run on the 32-wide N tile. A conv whose Cout is listed here writes
+# align32(Cout) columns instead of align64(Cout); everything downstream -- the
+# consumer's row stride, the 1x1 convs' K, the weight padding, the host's grid --
+# follows from tile_for(), so the policy is decided in exactly one place. Set by
+# measurement (tools/ab_conv.py); empty means every layer uses the 64-wide tile.
+NARROW_COUT: frozenset[int] = frozenset()
+
+
+def tile_for(cout: int) -> int:
+    return 32 if cout in NARROW_COUT else COUT_ALIGN
+
+
 def storage_stride(channels: int) -> int:
     """Physical channel stride of an NHWC activation: every conv writes its
-    Cout_pad (64-aligned) columns, so that is the width its consumers see; the
-    converted stem image is the one 4-wide tensor."""
-    return 4 if channels <= 4 else align(channels, COUT_ALIGN)
+    padded Cout, so that is the width its consumers see; the converted stem
+    image is the one 4-wide tensor."""
+    return 4 if channels <= 4 else align(channels, tile_for(channels))
 
 
-def pack(weight: np.ndarray, bias: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
-    """[Cout][Cin][k][k], [Cout] -> W16[Cout_pad][K_pad], b32[Cout_pad], shape info."""
+def pack(weight: np.ndarray, bias: np.ndarray, cout_align: int | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
+    """[Cout][Cin][k][k], [Cout] -> W16[Cout_pad][K_pad], b32[Cout_pad], shape info.
+
+    cout_align defaults to the tile policy; the A/B harness overrides it to pack
+    the same weights for both tiles.
+    """
     cout, cin, k, _ = weight.shape
-    cout_pad = align(cout, COUT_ALIGN)
+    cout_pad = align(cout, cout_align or tile_for(cout))
     # A 3x3 conv gathers c < cin_pad (4-aligned) inside rows of the input's
     # storage stride. A 1x1 conv is the plain matmul, whose A *is* the input
     # tensor, so its K must equal that stride and the weights are zero beyond cin.
