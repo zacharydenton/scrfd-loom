@@ -4,10 +4,10 @@
 #define SCRFD_KERNEL_COUNT 40
 // bytes per image, per buffer
 static const size_t scrfd_buffer_bytes[SCRFD_BUFFER_COUNT] = {3276800, 13107200, 13107200, 409600, 204800};
-static const char *const scrfd_kernel_stems[SCRFD_KERNEL_COUNT] = {"conv3x3_add_20x20_s1_c56of64_k512_n64", "conv3x3_add_40x40_s1_c56of64_k512_n64", "conv3x3_plain_20x20_s1_c56of64_k512_n64", "conv3x3_plain_20x20_s1_c80of128_k736_n64", "conv3x3_plain_40x40_s1_c56of64_k512_n64", "conv3x3_plain_40x40_s1_c80of128_k736_n64", "conv3x3_plain_40x40_s2_c56of64_k512_n64", "conv3x3_plain_80x80_s1_c56of64_k512_n64", "conv3x3_plain_80x80_s1_c80of128_k736_n64", "conv3x3_plain_80x80_s2_c56of64_k512_n64", "conv3x3_relu_160x160_s1_c56of64_k512_n64", "conv3x3_relu_160x160_s2_c56of64_k512_n128", "conv3x3_relu_20x20_s1_c224of256_k2016_n256", "conv3x3_relu_20x20_s1_c56of64_k512_n128", "conv3x3_relu_20x20_s1_c80of128_k736_n128", "conv3x3_relu_320x320_s1_c28of64_k256_n64", "conv3x3_relu_40x40_s1_c56of64_k512_n128", "conv3x3_relu_40x40_s1_c80of128_k736_n128", "conv3x3_relu_40x40_s1_c88of128_k800_n128", "conv3x3_relu_40x40_s2_c88of128_k800_n256", "conv3x3_relu_640x640_s2_c4of4_k64_n64", "conv3x3_relu_80x80_s1_c56of64_k512_n128", "conv3x3_relu_80x80_s1_c80of128_k736_n128", "conv3x3_relu_80x80_s1_c88of128_k800_n128", "conv3x3_relu_80x80_s2_c88of128_k800_n128", "conv3x3_relu_add_160x160_s1_c56of64_k512_n64", "conv3x3_relu_add_20x20_s1_c224of256_k2016_n256", "conv3x3_relu_add_40x40_s1_c88of128_k800_n128", "conv3x3_relu_add_80x80_s1_c88of128_k800_n128", "matmul_add_resized_k128_n64_40x40", "matmul_add_resized_k128_n64_80x80", "matmul_plain_k128_n128", "matmul_plain_k128_n256", "matmul_plain_k256_n64", "matmul_plain_k64_n128", "nchw_to_nhwc", "pool2_max_320x320_c64", "pool2_mean_160x160_c64", "pool2_mean_40x40_c128", "pool2_mean_80x80_c128"};
+static const char *const scrfd_kernel_stems[SCRFD_KERNEL_COUNT] = {"conv3x3_add_20x20_s1_c56of64_k512_n64", "conv3x3_add_40x40_s1_c56of64_k512_n64", "conv3x3_plain_20x20_s1_c56of64_k512_n64", "conv3x3_plain_20x20_s1_c80of128_k736_n64", "conv3x3_plain_40x40_s1_c56of64_k512_n64", "conv3x3_plain_40x40_s1_c80of128_k736_n64", "conv3x3_plain_40x40_s2_c56of64_k512_n64", "conv3x3_plain_80x80_s1_c56of64_k512_n64", "conv3x3_plain_80x80_s1_c80of128_k736_n64", "conv3x3_plain_80x80_s2_c56of64_k512_n64", "conv3x3_relu_160x160_s1_c56of64_k512_n64", "conv3x3_relu_160x160_s2_c56of64_k512_n128", "conv3x3_relu_20x20_s1_c224of256_k2016_n256", "conv3x3_relu_20x20_s1_c56of64_k512_n128", "conv3x3_relu_20x20_s1_c80of128_k736_n128", "conv3x3_relu_320x320_s1_c28of64_k256_n64", "conv3x3_relu_40x40_s1_c56of64_k512_n128", "conv3x3_relu_40x40_s1_c80of128_k736_n128", "conv3x3_relu_40x40_s1_c88of128_k800_n128", "conv3x3_relu_40x40_s2_c88of128_k800_n256", "conv3x3_relu_640x640_s2_c4of4_k64_n64", "conv3x3_relu_80x80_s1_c56of64_k512_n128", "conv3x3_relu_80x80_s1_c80of128_k736_n128", "conv3x3_relu_80x80_s1_c88of128_k800_n128", "conv3x3_relu_80x80_s2_c88of128_k800_n128", "conv3x3_relu_add_160x160_s1_c56of64_k512_n64", "conv3x3_relu_add_20x20_s1_c224of256_k2016_n256", "conv3x3_relu_add_40x40_s1_c88of128_k800_n128", "conv3x3_relu_add_80x80_s1_c88of128_k800_n128", "hwc_u8_to_nhwc", "matmul_add_resized_k128_n64_40x40", "matmul_add_resized_k128_n64_80x80", "matmul_plain_k128_n128", "matmul_plain_k128_n256", "matmul_plain_k256_n64", "matmul_plain_k64_n128", "pool2_max_320x320_c64", "pool2_mean_160x160_c64", "pool2_mean_40x40_c128", "pool2_mean_80x80_c128"};
 // kind: 0 convert, 1 conv3x3, 2 matmul, 3 pool; variant: 0 plain, 1 relu, 2 add, 3 relu_add, 4 add_resized, 5 max, 6 mean
 static const scrfd_launch scrfd_launches[SCRFD_LAUNCH_COUNT] = {
-  {0, 0, 35, "convert", "convert", 640, 640, 1, 4, 4, 0, 0, 640, 640, -1, 0, -1},
+  {0, 0, 29, "convert", "convert", 640, 640, 1, 4, 4, 0, 0, 640, 640, -1, 0, -1},
   {1, 1, 20, "c00", "conv3x3 640x640 relu", 640, 640, 2, 4, 4, 64, 64, 320, 320, 0, 1, -1},
   {1, 1, 15, "c01", "conv3x3 320x320 relu", 320, 320, 1, 28, 64, 256, 64, 320, 320, 1, 2, -1},
   {1, 1, 15, "c02", "conv3x3 320x320 relu", 320, 320, 1, 28, 64, 256, 64, 320, 320, 2, 1, -1},
@@ -20,7 +20,7 @@ static const scrfd_launch scrfd_launches[SCRFD_LAUNCH_COUNT] = {
   {1, 3, 25, "c08", "conv3x3 160x160 relu_add", 160, 160, 1, 56, 64, 512, 64, 160, 160, 0, 1, 2},
   {1, 1, 11, "c09", "conv3x3 160x160 relu", 160, 160, 2, 56, 64, 512, 128, 80, 80, 1, 0, -1},
   {3, 6, 37, "avgpool", "pool 160x160", 160, 160, 1, 56, 64, 0, 0, 80, 80, 1, 2, -1},
-  {2, 0, 34, "c11", "matmul 80x80 plain", 80, 80, 1, 64, 64, 64, 128, 80, 80, 2, 1, -1},
+  {2, 0, 35, "c11", "matmul 80x80 plain", 80, 80, 1, 64, 64, 64, 128, 80, 80, 2, 1, -1},
   {1, 3, 28, "c10", "conv3x3 80x80 relu_add", 80, 80, 1, 88, 128, 800, 128, 80, 80, 0, 2, 1},
   {1, 1, 23, "c12", "conv3x3 80x80 relu", 80, 80, 1, 88, 128, 800, 128, 80, 80, 2, 0, -1},
   {1, 3, 28, "c13", "conv3x3 80x80 relu_add", 80, 80, 1, 88, 128, 800, 128, 80, 80, 0, 1, 2},
@@ -30,21 +30,21 @@ static const scrfd_launch scrfd_launches[SCRFD_LAUNCH_COUNT] = {
   {1, 3, 28, "c17", "conv3x3 80x80 relu_add", 80, 80, 1, 88, 128, 800, 128, 80, 80, 0, 1, 2},
   {1, 1, 24, "c18", "conv3x3 80x80 relu", 80, 80, 2, 88, 128, 800, 128, 40, 40, 1, 0, -1},
   {3, 6, 39, "avgpool", "pool 80x80", 80, 80, 1, 88, 128, 0, 0, 40, 40, 1, 2, -1},
-  {2, 0, 31, "c20", "matmul 40x40 plain", 40, 40, 1, 128, 128, 128, 128, 40, 40, 2, 3, -1},
+  {2, 0, 32, "c20", "matmul 40x40 plain", 40, 40, 1, 128, 128, 128, 128, 40, 40, 2, 3, -1},
   {1, 3, 27, "c19", "conv3x3 40x40 relu_add", 40, 40, 1, 88, 128, 800, 128, 40, 40, 0, 2, 3},
   {1, 1, 18, "c21", "conv3x3 40x40 relu", 40, 40, 1, 88, 128, 800, 128, 40, 40, 2, 3, -1},
   {1, 3, 27, "c22", "conv3x3 40x40 relu_add", 40, 40, 1, 88, 128, 800, 128, 40, 40, 3, 0, 2},
   {1, 1, 19, "c23", "conv3x3 40x40 relu", 40, 40, 2, 88, 128, 800, 256, 20, 20, 0, 3, -1},
   {3, 6, 38, "avgpool", "pool 40x40", 40, 40, 1, 88, 128, 0, 0, 20, 20, 0, 2, -1},
-  {2, 0, 32, "c25", "matmul 20x20 plain", 20, 20, 1, 128, 128, 128, 256, 20, 20, 2, 4, -1},
+  {2, 0, 33, "c25", "matmul 20x20 plain", 20, 20, 1, 128, 128, 128, 256, 20, 20, 2, 4, -1},
   {1, 3, 26, "c24", "conv3x3 20x20 relu_add", 20, 20, 1, 224, 256, 2016, 256, 20, 20, 3, 2, 4},
   {1, 1, 12, "c26", "conv3x3 20x20 relu", 20, 20, 1, 224, 256, 2016, 256, 20, 20, 2, 4, -1},
   {1, 3, 26, "c27", "conv3x3 20x20 relu_add", 20, 20, 1, 224, 256, 2016, 256, 20, 20, 4, 3, 2},
   {1, 1, 12, "c28", "conv3x3 20x20 relu", 20, 20, 1, 224, 256, 2016, 256, 20, 20, 3, 4, -1},
   {1, 3, 26, "c29", "conv3x3 20x20 relu_add", 20, 20, 1, 224, 256, 2016, 256, 20, 20, 4, 2, 3},
-  {2, 0, 33, "c32", "matmul 20x20 plain", 20, 20, 1, 256, 256, 256, 64, 20, 20, 2, 4, -1},
-  {2, 4, 29, "c31", "matmul 40x40 add_resized", 40, 40, 1, 128, 128, 128, 64, 40, 40, 0, 3, 4},
-  {2, 4, 30, "c30", "matmul 80x80 add_resized", 80, 80, 1, 128, 128, 128, 64, 80, 80, 1, 0, 3},
+  {2, 0, 34, "c32", "matmul 20x20 plain", 20, 20, 1, 256, 256, 256, 64, 20, 20, 2, 4, -1},
+  {2, 4, 30, "c31", "matmul 40x40 add_resized", 40, 40, 1, 128, 128, 128, 64, 40, 40, 0, 3, 4},
+  {2, 4, 31, "c30", "matmul 80x80 add_resized", 80, 80, 1, 128, 128, 128, 64, 80, 80, 1, 0, 3},
   {1, 0, 7, "c33", "conv3x3 80x80 plain", 80, 80, 1, 56, 64, 512, 64, 80, 80, 0, 2, -1},
   {1, 0, 9, "c36", "conv3x3 80x80 plain", 80, 80, 2, 56, 64, 512, 64, 40, 40, 2, 0, -1},
   {1, 2, 1, "c34", "conv3x3 40x40 add", 40, 40, 1, 56, 64, 512, 64, 40, 40, 3, 1, 0},

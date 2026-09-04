@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scrfd-loom"
-version = "0.1.0"
+version = "0.2.0"
 description = "insightface's det_10g (SCRFD-10GF) face detector in AMD's Loom kernel language for gfx1151"
 readme = "README.md"
 license = "Apache-2.0"

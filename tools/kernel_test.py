@@ -25,7 +25,7 @@ def compile_kernel(source: Path, root_symbol: str, config: dict, out: Path) -> N
 
 
 def launch(hsaco: Path, kernel: str, grid, block, args, workdir: Path, repeat: int = 1):
-    """args: list of ('i32'|'f32', value) or ('in', ndarray) or ('out', shape/dtype tuple)."""
+    """args: list of ('i32'|'f32', value) or ('in'|'in_f16'|'in_u8', ndarray) or ('out', shape/dtype tuple)."""
     cmd = [str(LOOMRUN), "--hsaco", str(hsaco), "--kernel", kernel,
            "--grid", ",".join(map(str, grid)), "--block", ",".join(map(str, block)),
            "--repeat", str(repeat)]
@@ -40,6 +40,10 @@ def launch(hsaco: Path, kernel: str, grid, block, args, workdir: Path, repeat: i
         elif kind == "in_f16":
             path = workdir / f"in{index}.bin"
             np.ascontiguousarray(value, dtype=np.float16).tofile(path)
+            cmd += ["--in", str(path)]
+        elif kind == "in_u8":
+            path = workdir / f"in{index}.bin"
+            np.ascontiguousarray(value, dtype=np.uint8).tofile(path)
             cmd += ["--in", str(path)]
         elif kind == "inout_f16":
             array, shape = value

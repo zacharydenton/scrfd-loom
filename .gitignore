@@ -1,6 +1,5 @@
 build/
 host/scrfd
 host/loomrun
-host/libscrfd.so
 __pycache__/
 *.pyc

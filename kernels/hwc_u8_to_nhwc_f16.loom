@@ -1,0 +1,86 @@
+// The stem's input conversion. The input is the letterboxed BGR uint8 image
+// insightface's detect() builds, [B*S*S] pixels of 3 bytes; the output is NHWC
+// f16 with the channel count padded to 4, RGB, normalised -- blobFromImage's
+// (x - 127.5) / 128 with swapRB -- so every later gather of a vector<4xf16>
+// stays inside one tap. Doing the normalisation here means the host uploads
+// bytes (1.2 MB per image) instead of a normalised f32 blob four times larger,
+// and never builds that blob at all.
+//
+//   out[p, c] = c < 3 ? (in[p, 2 - c] - 127.5) / 128 : 0
+//
+// One workgroup per image row (b, y); 256 workitems stride the S pixels.
+// Bandwidth-trivial, so scalar loads and stores.
+
+amdgpu.target<gfx11-generic> @scrfd_hwc_u8_to_nhwc_gfx11 {subgroup_size = 32}
+
+config.decl @scrfd.hwc_u8_to_nhwc_f16.size : %value: index where [range(%value, 16, 4096), mul(%value, 16)]
+
+kernel.def target(@scrfd_hwc_u8_to_nhwc_gfx11) export("scrfd_hwc_u8_to_nhwc_f16") @scrfd_hwc_u8_to_nhwc_f16(%row_count: index) {
+  %c1 = index.constant 1 : index
+  %c256 = index.constant 256 : index
+  kernel.launch.config workgroups(%row_count, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
+} launch(%row_count: index, %input: buffer, %output: buffer) {
+  %size = config.get @scrfd.hwc_u8_to_nhwc_f16.size : index
+
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c3 = index.constant 3 : index
+  %c4 = index.constant 4 : index
+  %c256 = index.constant 256 : index
+  %c0_offset = index.constant 0 : offset
+  %zero_half = scalar.constant 0.0 : f16
+  %mean = scalar.constant 127.5 : f32
+  %inv_std = scalar.constant 0.0078125 : f32
+
+  // row_count = B*S is a launch argument; bound it in the body, never with a
+  // `where` on the launch (that miscompiles under hipModuleLaunchKernel).
+  %rows = index.assume %row_count [range(%row_count, 1, 1048576)] : index
+  %row_raw = kernel.workgroup.id<x> : index
+  %workitem = kernel.workitem.id<x> : index
+  %valid = index.cmp ult, %row_raw, %rows : index
+  %safe_row = scf.select %valid, %row_raw, %c0 : index
+  %row = index.assume %safe_row [lt(%safe_row, %rows)] : index
+
+  %input_global = buffer.assume.memory_space<global> %input : buffer
+  %output_global = buffer.assume.memory_space<global> %output : buffer
+  %pixel_rows = index.mul %rows, %size : index
+  %input_view = buffer.view %input_global[%c0_offset] : buffer -> view<[%pixel_rows]x[%c3]xi8>
+  %output_view = buffer.view %output_global[%c0_offset] : buffer -> view<[%pixel_rows]x[%c4]xf16>
+
+  %out_base = index.mul %row, %size : index
+
+  scf.if %valid {
+    scf.for %x0 = [%workitem to %size step %c256] {
+      %x = index.assume %x0 [lt(%x0, %size)] : index
+      %pixel0 = index.add %out_base, %x : index
+      %pixel = index.assume %pixel0 [lt(%pixel0, %pixel_rows)] : index
+
+      %b8 = view.load %input_view[%pixel, %c0] : view<[%pixel_rows]x[%c3]xi8> -> i8
+      %g8 = view.load %input_view[%pixel, %c1] : view<[%pixel_rows]x[%c3]xi8> -> i8
+      %r8 = view.load %input_view[%pixel, %c2] : view<[%pixel_rows]x[%c3]xi8> -> i8
+      %b32 = scalar.extui %b8 : i8 to i32
+      %g32 = scalar.extui %g8 : i8 to i32
+      %r32 = scalar.extui %r8 : i8 to i32
+      %b = scalar.uitofp %b32 : i32 to f32
+      %g = scalar.uitofp %g32 : i32 to f32
+      %r = scalar.uitofp %r32 : i32 to f32
+      %b_centered = scalar.subf %b, %mean : f32
+      %g_centered = scalar.subf %g, %mean : f32
+      %r_centered = scalar.subf %r, %mean : f32
+      %b_scaled = scalar.mulf %b_centered, %inv_std : f32
+      %g_scaled = scalar.mulf %g_centered, %inv_std : f32
+      %r_scaled = scalar.mulf %r_centered, %inv_std : f32
+      %b_half = scalar.fptrunc %b_scaled : f32 to f16
+      %g_half = scalar.fptrunc %g_scaled : f32 to f16
+      %r_half = scalar.fptrunc %r_scaled : f32 to f16
+
+      // swapRB: the output row is R, G, B, 0.
+      view.store %r_half, %output_view[%pixel, %c0] : f16, view<[%pixel_rows]x[%c4]xf16>
+      view.store %g_half, %output_view[%pixel, %c1] : f16, view<[%pixel_rows]x[%c4]xf16>
+      view.store %b_half, %output_view[%pixel, %c2] : f16, view<[%pixel_rows]x[%c4]xf16>
+      view.store %zero_half, %output_view[%pixel, %c3] : f16, view<[%pixel_rows]x[%c4]xf16>
+    }
+  }
+  kernel.return
+}

@@ -17,10 +17,8 @@ compile() { # source-stem root-symbol output-stem config...
 
 echo "compiling for $LOOM_TARGET"
 
-# Stem input: NCHW f32 blob -> NHWC f16, 3 channels padded to 4.
-compile nchw_to_nhwc_f16 scrfd_nchw_to_nhwc_f16 nchw_to_nhwc \
-  scrfd.nchw_to_nhwc_f16.size=640 scrfd.nchw_to_nhwc_f16.channels=3 \
-  scrfd.nchw_to_nhwc_f16.channels_pad=4
+# Stem input: letterboxed BGR uint8 -> normalised RGB NHWC f16, 3 channels padded to 4.
+compile hwc_u8_to_nhwc_f16 scrfd_hwc_u8_to_nhwc_f16 hwc_u8_to_nhwc scrfd.hwc_u8_to_nhwc_f16.size=640
 
 # Everything the graph launches, one line per distinct (kernel, config), generated
 # by tools/gen_launch_table.py from the ONNX file.

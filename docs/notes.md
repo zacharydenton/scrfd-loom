@@ -226,3 +226,49 @@ its 20^2/40^2 layers are the ones with the longest K.
 | loom, batch 8 | 391.5 | 2.55 | 1.94x |
 | loom, batch 1 | 311.5 | 3.21 | **1.54x** |
 | onnxruntime MIGraphX, batch 1 | 201.9 | 4.95 | 1.00x |
+
+## The Python API was paying 2.4 ms/img on the host
+
+The user's target is 3.186 ms/img at batch 17 through the Python API, and they saw 3.3
+at batch 16 where the CLI benchmark said 2.55. Timed stage by stage at batch 16 on
+this box (CPU load 11, the 10-core job resident), ms per image:
+
+| stage | ms/img |
+| --- | ---: |
+| letterbox (cv2.resize + canvas) | 0.114 |
+| blobFromImage | 0.648 |
+| np.concatenate of the blobs | 0.360 |
+| scrfd_run (H2D 4.9 MB/img f32 + GPU + D2H heads) | 2.599 |
+| heads_to_outputs (f32 cast, sigmoid, 9 arrays per image) | 0.465 |
+| postprocess (anchor decode on 33600 rows + NMS) | 0.406 |
+| detect_batch end to end | 4.974 |
+
+The network is half of it. Everything else is per-image NumPy on a loaded CPU, and
+the f32 blob is uploaded at four times the size of the image it came from.
+
+Fix, in one ABI bump (2): the session takes the letterboxed BGR uint8 image and the
+converter kernel does blobFromImage's (x-127.5)/128 with swapRB on the way to NHWC f16
+(bit-exact to the old path, 1.2 MB/img uploaded instead of 4.9); the heads come back
+into pinned host memory and the C++ session decodes them -- sigmoid, threshold,
+distance2bbox / distance2kps -- into compact candidate rows, scanning raw f16 logits
+against logit(det_thresh) so exp runs only for the survivors; Python does letterbox
+straight into the preallocated batch canvas, then argsort + NMS on a few dozen rows.
+Python never builds a blob, never sees the head tensors, and never concatenates.
+
+Result, same box, stages best of 7, ms per image:
+
+| stage | batch 16 | batch 17 | batch 1 |
+| --- | ---: | ---: | ---: |
+| letterbox_into | 0.137 | 0.139 | 0.078 |
+| scrfd_run (H2D 1.2 MB/img + GPU + D2H + decode) | 2.567 | 2.588 | 3.510 |
+| argsort + NMS | 0.049 | 0.082 | 0.060 |
+| detect_batch end to end | 2.851 | 2.831 | 4.225 |
+
+4.97 -> 2.85 ms/img at batch 16, 1.74x, and the API now sits 0.3 ms/img above the
+network. The converter is bit-exact to the old blob path; the native decode agrees
+with the Python decode on identical heads to 1e-2 px (tools/test_python_api.py); the
+end-to-end detections are unchanged. The box is noisy: batch 17 measured 2.83 and
+3.53 ms/img back to back with the load average moving from 10 to 17, and the
+interleaved benchmark (mean of 6 calls, best of 3 rounds) reads 3.25 at batch 16 and
+2.95 at batch 32 vs MIGraphX's 4.96 network-only. The floor is the 2.55 ms/img of GPU
+time; the next lever for the API is inside the kernels, not around them.

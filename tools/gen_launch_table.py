@@ -67,7 +67,7 @@ class Launch:
     def stem(self) -> str:
         """The HSACO this launch runs: one per distinct kernel+config."""
         if self.kind == "convert":
-            return "nchw_to_nhwc"
+            return "hwc_u8_to_nhwc"
         if self.kind == "pool":
             return f"pool2_{self.variant}_{self.h}x{self.w}_c{self.cin_stride}"
         if self.kind == "matmul":

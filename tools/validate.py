@@ -49,13 +49,16 @@ def heads_to_outputs(heads: list[np.ndarray], batch: int, size: int) -> list[lis
     return per_image
 
 
-def run_loom(blob: np.ndarray, extra_args: list[str]) -> list[np.ndarray]:
-    """blob [B,3,S,S] f32 -> the three head tensors, via the CLI."""
-    batch, _, size, _ = blob.shape
+def run_loom(det_img: np.ndarray, extra_args: list[str]) -> list[np.ndarray]:
+    """Letterboxed BGR uint8 image(s), (S,S,3) or (B,S,S,3) -> the three head tensors, via the CLI."""
+    image = np.ascontiguousarray(det_img, dtype=np.uint8)
+    if image.ndim == 3:
+        image = image[None]
+    batch, size = image.shape[0], image.shape[1]
     env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
     with tempfile.TemporaryDirectory() as tmp:
-        src, dst = Path(tmp) / "blob.bin", Path(tmp) / "heads.bin"
-        np.ascontiguousarray(blob, dtype=np.float32).tofile(src)
+        src, dst = Path(tmp) / "images.bin", Path(tmp) / "heads.bin"
+        image.tofile(src)
         subprocess.run([str(ROOT / "host/scrfd"), "--weights", str(ROOT / "build/weights"),
                         "--kernels", str(ROOT / "build/kernels"), "--input", str(src),
                         "--output", str(dst), "--batch", str(batch)] + extra_args,
@@ -85,7 +88,7 @@ def main() -> int:
 
     sess = ort.InferenceSession(str(G.model_path()), providers=["CPUExecutionProvider"])
     want = sess.run(None, {sess.get_inputs()[0].name: blob})
-    got = heads_to_outputs(run_loom(blob, sys.argv[1:]), 1, graph.size)[0]
+    got = heads_to_outputs(run_loom(det_img, sys.argv[1:]), 1, graph.size)[0]
 
     labels = [f"score/{s}" for s in STRIDES] + [f"box/{s}" for s in STRIDES] + [f"kps/{s}" for s in STRIDES]
     for label, g, w in zip(labels, got, want):
