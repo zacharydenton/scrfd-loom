@@ -171,3 +171,58 @@ produced width and asserts the consumer's stride matches, and the launch table
 carries the tile. With the policy empty the table regenerates byte-identical apart
 from the new field. `kernels/conv3x3_narrow_f16_wmma` (+ variants) is the 64x32 tile
 derived from dinov3-loom's narrow matmul by the same generator; 64 VGPRs, 15872 B.
+
+## Lever 2: a 32-wide N tile -- lost on every layer
+
+The case: Cout 28/56/80/88 waste 12-56% of a 64-wide tile's columns; a 64x32 tile
+(dinov3-loom's narrow matmul, same gather) wastes 12% at most. On dinov3-loom the
+narrow tile ran ~0.8x per useful FLOP, so the question was whether the saved columns
+outweigh that. Interleaved best-of-5, batch 4, real weights, both correct:
+
+| layer | 64-wide | 32-wide | |
+| --- | ---: | ---: | ---: |
+| 28->56 @320^2 | 923.8 us | 1251.3 us | 0.738x |
+| 56->56 @160^2 | 374.1 | 524.0 | 0.714x |
+| 88->88 @80^2 | 283.4 | 297.3 | 0.953x |
+| 224->224 @20^2 | 103.3 | 143.8 | 0.718x |
+
+No. Where Cout is a multiple of 64 (well, 56 and 224 waste the same share on either
+tile) the narrow tile is simply 0.72x; on 88->88, the layer it was built for, the 20%
+fewer FLOPs buy back most but not all of that. The gather, not the WMMA, is the cost
+per row, and a 32-wide tile does the same gather for half the output. Policy stays
+"every layer 64-wide"; the narrow kernels move to experiments/ and the tile field
+comes back out of the table, since nothing selects it.
+
+## The 320^2 re-read is not the bottleneck
+
+The plan reserved an LDS input-patch variant for the stem-resolution layers, predicted
+gather-bandwidth-bound at 5-8 TFLOP/s. Measured: 12.2-12.8, the same as the 80^2 and
+20^2 layers (12.5-15.7). L2 absorbs the 9x re-read; what bounds every layer alike is
+the per-row staging arithmetic, which is why the hoist won everywhere. That lever
+stays unbuilt.
+
+## Benchmark with the hoist
+
+Same protocol (interleaved, best of 3, CPU load 10). The single-kernel wins compound
+to 1.054x at batch 32 and 1.087x at batch 1 -- the small batch gains more because
+its 20^2/40^2 layers are the ones with the longest K.
+
+| configuration | img/s | ms/img | vs MIGraphX |
+| --- | ---: | ---: | ---: |
+| loom, batch 32 | 391.9 | 2.55 | **1.94x** |
+| loom, batch 8 | 391.5 | 2.55 | 1.94x |
+| loom, batch 1 | 311.5 | 3.21 | **1.54x** |
+| onnxruntime MIGraphX, batch 1 | 201.9 | 4.95 | 1.00x |
+
+## Benchmark with the hoist
+
+Same protocol (interleaved, best of 3, CPU load 10). The single-kernel wins compound
+to 1.054x at batch 32 and 1.087x at batch 1 -- the small batch gains more because
+its 20^2/40^2 layers are the ones with the longest K.
+
+| configuration | img/s | ms/img | vs MIGraphX |
+| --- | ---: | ---: | ---: |
+| loom, batch 32 | 391.9 | 2.55 | **1.94x** |
+| loom, batch 8 | 391.5 | 2.55 | 1.94x |
+| loom, batch 1 | 311.5 | 3.21 | **1.54x** |
+| onnxruntime MIGraphX, batch 1 | 201.9 | 4.95 | 1.00x |

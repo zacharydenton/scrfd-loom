@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import graph as G
-from export_weights import align, storage_stride, head_groups, tile_for, CIN_ALIGN, K_ALIGN
+from export_weights import align, storage_stride, head_groups, CIN_ALIGN, K_ALIGN, COUT_ALIGN
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -59,7 +59,6 @@ class Launch:
     n_size: int = 0
     ho: int = 0
     wo: int = 0
-    tile: int = 64            # N tile width: 64, or 32 for the narrow conv
     src_buf: int = -1
     dst_buf: int = -1
     extra_buf: int = -1
@@ -74,8 +73,7 @@ class Launch:
         if self.kind == "matmul":
             geo = f"_{self.h}x{self.w}" if self.variant == "add_resized" else ""
             return f"matmul_{self.variant}_k{self.k_size}_n{self.n_size}{geo}"
-        narrow = "narrow_" if self.tile == 32 else ""
-        return (f"conv3x3_{narrow}{self.variant}_{self.h}x{self.w}_s{self.stride}"
+        return (f"conv3x3_{self.variant}_{self.h}x{self.w}_s{self.stride}"
                 f"_c{self.cin_pad}of{self.cin_stride}_k{self.k_size}_n{self.n_size}")
 
 
@@ -144,13 +142,12 @@ def build_schedule(graph: G.Graph):
             kind = "conv3x3" if op.ksize == 3 else "matmul"
             cin_pad = align(cin, CIN_ALIGN) if op.ksize == 3 else cs
             k_size = align(op.ksize * op.ksize * cin_pad, K_ALIGN)
-            tile = tile_for(op.cout) if op.ksize == 3 else 64
-            n_size = align(op.cout, tile)
+            n_size = align(op.cout, COUT_ALIGN)
             ho, wo = op.out_shape[2], op.out_shape[3]
             launches.append(Launch(kind, variant, op.name, op.inputs[0], op.output, extra,
-                                   stage=f"{kind} {h}x{w} {variant}" + (" narrow" if tile == 32 else ""),
+                                   stage=f"{kind} {h}x{w} {variant}",
                                    h=h, w=w, stride=op.stride, cin=cin, cin_pad=cin_pad, cin_stride=cs,
-                                   k_size=k_size, cout=op.cout, n_size=n_size, ho=ho, wo=wo, tile=tile))
+                                   k_size=k_size, cout=op.cout, n_size=n_size, ho=ho, wo=wo))
             shapes[op.output] = (ho, wo, n_size)
         elif op.kind in ("maxpool", "avgpool"):
             _, c, h, w = graph.shapes[op.inputs[0]]
@@ -252,7 +249,7 @@ def emit(ordered: list[Launch], shapes, buffers) -> None:
     for l in ordered:
         lines.append(f'  {{{kinds[l.kind]}, {variants[l.variant]}, {stems.index(l.stem)}, "{l.name}", "{l.stage}", '
                      f'{l.h}, {l.w}, {l.stride}, {l.cin_pad}, {l.cin_stride}, {l.k_size}, {l.n_size}, {l.ho}, {l.wo}, '
-                     f'{l.tile}, {l.src_buf}, {l.dst_buf}, {l.extra_buf}}},')
+                     f'{l.src_buf}, {l.dst_buf}, {l.extra_buf}}},')
     lines.append("};")
     head_lines = ", ".join(f'{{"{l.name}", {l.dst_buf}, {l.h}, {l.w}}}' for l in heads)
     lines.append(f"static const scrfd_head scrfd_heads[3] = {{{head_lines}}};")
@@ -286,8 +283,7 @@ def emit(ordered: list[Launch], shapes, buffers) -> None:
                 build.append(f"compile {src} {sym} {l.stem} {ns}.k_size={l.k_size} {ns}.n_size={l.n_size}")
         else:
             suffix = "" if l.variant == "plain" else f"_{l.variant}"
-            base = "conv3x3_narrow_f16_wmma" if l.tile == 32 else "conv3x3_f16_wmma"
-            ns, src, sym = f"scrfd.{base}{suffix}", f"{base}{suffix}", f"scrfd_{base}{suffix}"
+            ns, src, sym = f"scrfd.conv3x3_f16_wmma{suffix}", f"conv3x3_f16_wmma{suffix}", f"scrfd_conv3x3_f16_wmma{suffix}"
             build.append(f"compile {src} {sym} {l.stem} {ns}.height={l.h} {ns}.width={l.w} {ns}.stride={l.stride} "
                          f"{ns}.cin_pad={l.cin_pad} {ns}.cin_stride={l.cin_stride} {ns}.k_size={l.k_size} {ns}.n_size={l.n_size}")
     (ROOT / "scripts/kernels.generated").write_text("\n".join(build) + "\n")

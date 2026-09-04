@@ -64,12 +64,21 @@ production rather than against itself.
 
 ## Benchmark
 
-*(pending -- `tools/benchmark.py`, interleaved against onnxruntime+MIGraphX; the table
-and the machine state it was measured under go here.)*
+`tools/benchmark.py`, interleaved with onnxruntime+MIGraphX on the same box, best of
+three rounds. Measured on a Radeon 8060S (gfx1151) with a 10-core CPU job resident
+(load average 10), so treat the absolute numbers as a floor.
 
-First numbers, before any tuning, with a 10-core CPU job resident: batch 1
-**303 img/s (3.30 ms)**, batch 32 374 img/s (2.67 ms). MIGraphX: 5.07 ms, batch 1
-only.
+| configuration | img/s | ms/img | vs MIGraphX |
+| --- | ---: | ---: | ---: |
+| scrfd-loom, batch 32 | **391.9** | 2.55 | **1.94x** |
+| scrfd-loom, batch 8 | 391.5 | 2.55 | 1.94x |
+| scrfd-loom, batch 1 | **311.5** | 3.21 | **1.54x** |
+| onnxruntime + MIGraphX, batch 1 | 201.9 | 4.95 | 1.00x |
+
+The deployed ONNX graph is `[1, 3, ?, ?]`: MIGraphX cannot batch it, so its number
+is a latency. Batching helps here mostly by keeping the 20x20 and 40x40 layers busy;
+the peak is reached by batch 8. Detections are unchanged from insightface's
+(worst 1-IoU 0.0006, score delta 1e-4, keypoints 0.02 px on the test image).
 
 ## Replacing insightface
 

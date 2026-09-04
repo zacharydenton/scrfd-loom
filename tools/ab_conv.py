@@ -1,6 +1,6 @@
 """Interleaved A/B of two 3x3 conv kernel sources on the real heavy layers.
 
-    python3 tools/ab_conv.py experiments/conv3x3_hoisted_f16_wmma.loom
+    python3 tools/ab_conv.py experiments/conv3x3_narrow_f16_wmma.loom
 
 Compares the candidate against kernels/conv3x3_f16_wmma.loom, correctness
 first (against the float64 reference, or it does not count), then best-of-N

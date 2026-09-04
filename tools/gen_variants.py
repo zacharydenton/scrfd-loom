@@ -18,9 +18,8 @@ import argparse
 from pathlib import Path
 
 KERNELS = Path(__file__).resolve().parent.parent / "kernels"
-# (source file, export symbol, config namespace): the 64-wide and 32-wide N tiles.
-BASES = (("conv3x3_f16_wmma.loom", "scrfd_conv3x3_f16_wmma", "scrfd.conv3x3_f16_wmma"),
-         ("conv3x3_narrow_f16_wmma.loom", "scrfd_conv3x3_narrow_f16_wmma", "scrfd.conv3x3_narrow_f16_wmma"))
+# (source file, export symbol, config namespace)
+BASES = (("conv3x3_f16_wmma.loom", "scrfd_conv3x3_f16_wmma", "scrfd.conv3x3_f16_wmma"),)
 SOURCE, SYMBOL, NAMESPACE = BASES[0]
 
 LAUNCH = "} launch(%m_size: index, %a: buffer, %w: buffer, %bias: buffer, %c: buffer) {"

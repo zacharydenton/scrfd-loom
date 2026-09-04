@@ -27,9 +27,7 @@ step "loom sources are canonically formatted" bash -c '"$LOOM_FORMAT" --check ke
 step "generated kernels match their generators" bash -c '
   python3 tools/gen_conv.py --output-dir "$tmpdir" >/dev/null &&
   python3 tools/gen_variants.py --output-dir "$tmpdir" >/dev/null &&
-  for f in conv3x3_f16_wmma conv3x3_narrow_f16_wmma \
-           conv3x3_f16_wmma_relu conv3x3_f16_wmma_add conv3x3_f16_wmma_relu_add \
-           conv3x3_narrow_f16_wmma_relu conv3x3_narrow_f16_wmma_add conv3x3_narrow_f16_wmma_relu_add \
+  for f in conv3x3_f16_wmma conv3x3_f16_wmma_relu conv3x3_f16_wmma_add conv3x3_f16_wmma_relu_add \
            matmul_add_resized_f16_wmma; do
     "$LOOM_FORMAT" --in-place "$tmpdir/$f.loom" >/dev/null && cmp -s "$tmpdir/$f.loom" "kernels/$f.loom" || { echo "  $f differs"; exit 1; }
   done'
