@@ -243,6 +243,86 @@ def widen_tile(s: str, ns: str) -> str:
     return s
 
 
+def prefetch(s: str, ns: str) -> str:
+    """Register prefetch. The k-loop carries the next step's gathered A packet and
+    W packet(s): each iteration stores the packets it was handed, barriers, issues
+    the global loads for k+32 into registers, then runs the WMMA on the staged
+    tile, so the load latency overlaps the multiply instead of stalling every
+    step. Measured 1.05-1.25x on the real layers (docs/notes.md, Lever 8). The
+    128-wide tile stages W in two passes; its loop is unrolled into two carried
+    packets."""
+    hdr = re.search(r"^  (%acc0[^=]*)= scf\.for %k_base = \[%c0 to %k_size step %c32\]\((.*?)\) -> \((.*?)\) \{\n", s, re.M)
+    assert hdr, "k-loop header"
+    results, iters, types = hdr.group(1).strip(), hdr.group(2), hdr.group(3)
+    i = hdr.end()
+    barrier = "    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)\n"
+    j = s.index(barrier, i)
+    block = s[i:j]
+    assert "%source_k = index.add %k_base, %load_k : index" in block
+    prelude = ""
+    w_loop = re.search(r"^ *scf\.for %w_half = \[%c0 to %c2 step %c1\] \{\n(?:.*\n)*? *\}\n", block, re.M)
+    if w_loop:   # the 128-wide tile: two W rows per lane, explicit
+        prelude = "  %w_row_hi = index.add %load_row, %c64 : index\n"
+        block = block.replace(w_loop.group(0), """      %source_n = index.add %base_n, %load_row : index
+      %source_n_hi = index.add %base_n, %w_row_hi : index
+      %w_values = vector.load %w_view[%source_n, %source_k] : view<[%n_size]x[%k_size]xf16> -> vector<8xf16>
+      %w_values_hi = vector.load %w_view[%source_n_hi, %source_k] : view<[%n_size]x[%k_size]xf16> -> vector<8xf16>
+      vector.store %w_values, %w_stage_view[%load_row, %load_k] : vector<8xf16>, view<128x40xf16>
+      vector.store %w_values_hi, %w_stage_view[%w_row_hi, %load_k] : vector<8xf16>, view<128x40xf16>
+""")
+    carried = ["%a_values", "%w_values"] + (["%w_values_hi"] if w_loop else [])
+    stores = {}
+    loads = block
+    for name in carried:
+        m = re.search(r"^ *vector\.store " + re.escape(name) + r",.*\n", loads, re.M)
+        assert m, name
+        stores[name] = m.group(0)
+        loads = loads.replace(m.group(0), "")
+    # the prefetch of the step after the last must not read past K
+    for name, row in (("%w_values", "%source_n"), ("%w_values_hi", "%source_n_hi")):
+        m = re.search(r"^( *)" + re.escape(name) + r" = vector\.load %w_view\[" + re.escape(row) + r", %source_k\] : view<\[%n_size\]x\[%k_size\]xf16> -> vector<8xf16>\n", loads, re.M)
+        if not m:
+            continue
+        ind, tag = m.group(1), name[len("%w_values"):]
+        loads = loads.replace(m.group(0), f"""{ind}%w_in_k{tag} = index.cmp ult, %source_k, %k_size : index
+{ind}{name} = scf.if %w_in_k{tag} -> (vector<8xf16>) {{
+{ind}  %w_k{tag} = index.assume %source_k [lt(%source_k, %k_size)] : index
+{ind}  %w_loaded{tag} = vector.load %w_view[{row}, %w_k{tag}] : view<[%n_size]x[%k_size]xf16> -> vector<8xf16>
+{ind}  scf.yield %w_loaded{tag} : vector<8xf16>
+{ind}}} else {{
+{ind}  scf.yield %zero_f16x8 : vector<8xf16>
+{ind}}}
+""")
+
+    def instance(kvar: str, tag: str) -> tuple[str, list[str]]:
+        t = loads.replace("%source_k = index.add %k_base, %load_k : index", f"%source_k = index.add {kvar}, %load_k : index")
+        names = sorted(set(re.findall(r"^\s*(%[a-z_0-9]+) = ", t, re.M)), key=len, reverse=True)
+        for n in names:
+            t = re.sub(re.escape(n) + r"(?![a-z_0-9])", n + tag, t)
+        return t, [c + tag for c in carried]
+
+    pro, first = instance("%c0", "_first")
+    body, nxt = instance("%k_next", "_next")
+    cur = [c.replace("_values", "_cur") for c in carried]
+    store_lines = "".join(stores[c].replace(c + ",", cur[k] + ",").replace("[%row, %load_k]", "[%load_row, %load_k]")
+                          for k, c in enumerate(carried))
+    iter_args = iters + "".join(f", {cur[k]} = {first[k]} : vector<8xf16>" for k in range(len(carried)))
+    ret_types = types + ", vector<8xf16>" * len(carried)
+    extra_results = "".join(f", %{c[1:]}_last" for c in carried)
+    new = ("  // The first step's packets, gathered before the loop; every iteration then\n"
+           "  // stores the packets it was handed and gathers the next step's while the\n"
+           "  // WMMA runs on the staged tile.\n" + prelude + pro
+           + f"  {results}{extra_results} = scf.for %k_base = [%c0 to %k_size step %c32]({iter_args}) -> ({ret_types}) {{\n"
+           + store_lines + barrier + "    %k_next = index.add %k_base, %c32 : index\n" + body)
+    k = s.index("    %next0, %next1", j)
+    y = re.search(r"^    scf\.yield (%next0[^:]*) : ([^\n]*)\n", s[k:], re.M)
+    assert y, "k-loop yield"
+    e = k + y.start()
+    return (s[:hdr.start()] + new + s[k:e]
+            + f"    scf.yield {y.group(1)}, {', '.join(nxt)} : {y.group(2)}, {', '.join(['vector<8xf16>'] * len(carried))}\n"
+            + s[e + len(y.group(0)):])
+
+
 def derive(target: str) -> str:
     src_stem, src_sym, src_ns, sym, ns, tile = SOURCES[target]
     s = (KERNELS / f"{src_stem}.loom").read_text()
@@ -310,7 +390,9 @@ config.decl @{ns}.k_size : %value: index where [range(%value, 32, 16384), mul(%v
         scf.yield %zero_f16x4 : vector<4xf16>
       }""", GATHER)
     s = widen_gather(HEADER.format(tile=tile, source=src_stem) + s, ns)
-    return widen_tile(s, ns) if tile == 128 else s
+    if tile == 128:
+        s = widen_tile(s, ns)
+    return prefetch(s, ns)
 
 
 def main() -> None:

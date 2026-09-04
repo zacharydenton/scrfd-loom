@@ -384,3 +384,99 @@ policies are within this box's +-4% noise of each other, and at batch 1 the 128 
 keeps its 5%. It ships as the policy for n_size == 128 on that basis -- a neutral-to-
 small win, not the 10% the per-layer numbers promised. Lesson recorded: below about
 5% end to end, nothing is decidable on this machine while the 10-core job runs.
+
+## Lever 7: the input patch in LDS -- correct, and no faster
+
+The lever the plan held in reserve. The 64-row M tile becomes an 8x8 block of output
+pixels of one image; per 32-channel chunk of Cin the 10x10-pixel patch around it is
+loaded into LDS once (100 x 40 halves, zero outside the image and beyond Cin_pad),
+and each of the nine taps builds the 64x32 A stage from it with LDS reads. Nine
+global gathers per element become 100/64 loads per element per chunk. Same W side,
+WMMA loop and epilogue; 18240 B LDS, 72 VGPRs, stride 1 and sides multiples of 8.
+Its loop runs 9 x ceil(Cin_pad/32) steps, so Cin_pad off a multiple of 32 does zero
+work: 56 -> 64 (14%), 80 -> 96 (20%), 88 -> 96 (9%), 28 -> 32 (0%).
+
+Batch 16, best of 5, correct on every layer:
+
+| layer | shipped | patch | | zero work |
+| --- | ---: | ---: | ---: | ---: |
+| 28->56 @320^2 | 3120.0 us | 3118.5 | 1.000x | 0% |
+| 56->56 @160^2 | 1293.6 | 1467.0 | 0.882x | 14% |
+| 88->88 @80^2 | 997.0 | 978.0 | 1.019x | 9% |
+| 88->88 @40^2 | 239.9 | 250.6 | 0.957x | 9% |
+| 80->80 @80^2 | 900.1 | 982.6 | 0.916x | 20% |
+
+The speedup tracks the zero work and nothing else: taking five-sixths of the global
+gathers away bought exactly zero. So after the 8-wide packets the gather is not the
+bound; the per-step pipeline is -- two barriers, the LDS round trip and the exposed
+load latency of every 32-wide k-step, amortised over one 64x64 tile. That is the
+same wall dinov3-loom's matmul hit at 46% of peak, and it says the conv is now as
+fast as this loop structure allows. Not shipped; kept under experiments/.
+
+## Lever 8: register prefetch -- won on every layer
+
+If the per-step pipeline is the bound, the exposed latency of each step's global
+loads is the obvious part of it: the shipped loop gathers, stores to LDS, barriers,
+multiplies, barriers, and every gather waits on memory with nothing to overlap.
+The prefetch variant carries the next step's A packet and W packet in the k-loop:
+each iteration stores the packets it was handed, barriers, issues the loads for
+k+32 into registers, then runs the WMMA on the staged tile. The W load past K is
+guarded. 80 VGPRs against 72, LDS unchanged.
+
+Batch 16, best of 5, correct on every layer:
+
+| layer | shipped | prefetch | |
+| --- | ---: | ---: | ---: |
+| 28->56 @320^2 | 3001.9 us | 2872.7 | 1.045x |
+| 56->56 @160^2 | 1441.4 | 1150.8 | **1.252x** |
+| 88->88 @80^2 | 981.3 | 870.9 | **1.127x** |
+| 88->88 @40^2 | 239.9 | 204.9 | **1.171x** |
+| 224->224 @20^2 | 287.8 | 253.2 | **1.136x** |
+
+The 160^2 layer reaches 20 TFLOP/s and the 20^2 one 22.8, past anything the matmul
+structure reached in dinov3-loom. Folded into the generator (`prefetch` in
+tools/gen_conv.py) for the 64-wide family; the 128-wide family stages W in a
+two-pass loop and is judged whole-network against the prefetched 64-wide kernel
+before deciding whether to port it.
+
+Ported to the 128-wide family too (its two W packets carried alongside the A packet).
+Whole network, interleaved, the prefetched 64-only policy against the prefetched mix:
+
+| batch | 64-only | 128 where padded 128 | |
+| --- | ---: | ---: | ---: |
+| 16 | 2.148 ms/img | 2.028 | **1.059x** |
+| 1 | 2.615 | 2.457 | **1.064x** |
+| 32 | 2.208 | 2.085 | **1.059x** |
+
+With the load latency hidden, the wider tile's halved gather finally shows end to
+end, at every batch. The policy stands. The native call at batch 16 over this round:
+2.57 (start) -> 2.29 (8-wide gather) -> 2.03 ms/img (prefetch + 128 tile).
+
+## Lever 9: double-buffered LDS stages -- lost on every layer
+
+With the prefetch in place, the remaining fixed cost per 32-wide step is its two
+barriers. Two A/W stage sets alternating, walked 64 k at a time -- barrier, gather
+k+32 into registers, multiply stage 0, store into stage 1, barrier, gather k+64,
+multiply stage 1, store into stage 0 -- halves the barriers per step; 20480 B LDS
+(still 3/CU), 96 VGPRs. Batch 16, best of 5, correct:
+
+| layer | prefetch (shipped) | + double buffer | |
+| --- | ---: | ---: | ---: |
+| 28->56 @320^2 | 2875.3 us | 3270.7 | 0.879x |
+| 56->56 @160^2 | 1176.1 | 1270.1 | 0.926x |
+| 88->88 @80^2 | 859.4 | 974.3 | 0.882x |
+| 88->88 @40^2 | 203.3 | 235.9 | 0.862x |
+| 224->224 @20^2 | 257.4 | 280.9 | 0.916x |
+
+Uniformly slower: the barrier saved is worth less than the 96-VGPR wave (fewer in
+flight) and the longer live ranges cost. Not shipped; kept under experiments/.
+
+## Where the round ends
+
+Native call at batch 16 over this round: 2.57 -> 2.29 (8-wide gather) -> 2.03
+(prefetch + 128-wide tile) ms/img. Python API, mean of calls, best of 3 rounds, load
+10-16: 2.43 ms/img at batch 16, 2.37 at 32, 2.99 at 1, vs MIGraphX 5.20 this round.
+Measured and rejected on the way: the 32-wide tile, 4 workgroups/CU, hipGraph
+replay, the LDS input patch, double-buffered stages. The conv now runs 16-22 TFLOP/s
+on the real layers, above dinov3-loom's matmuls; what is left is the structure
+itself, and five different restructurings of it have lost.

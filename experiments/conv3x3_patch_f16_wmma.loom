@@ -1,0 +1,285 @@
+// EXPERIMENT: 3x3 convolution, pad 1, stride 1, as an implicit GEMM with the input
+// patch staged in LDS. The 64-row M tile is an 8x8 block of output pixels of one
+// image; for each 32-channel chunk of Cin the 10x10-pixel patch around the block
+// is loaded once (zero outside the image and beyond Cin_pad), and each of the nine
+// taps builds the 64x32 A stage from it with LDS reads. Nine global gathers per
+// element become 100/64 loads per element per chunk. The W side, the k-loop's
+// WMMA and the epilogue are the shipped conv's. One LDS allocation: A at 0, W at
+// 5120, the patch at 10240 (100 pixels x 40 halves), the result tiles aliasing
+// A/W after the loops -- 18240 bytes, 3 workgroups/CU.
+//
+// Requires stride 1 and height, width multiples of 8. K = 9*Cin_pad rounded to 32 as
+// before; the loop runs 9 x ceil(Cin_pad/32) steps of 32, so a Cin_pad that is not
+// a multiple of 32 does some zero work (56 -> 64: 14%, 88 -> 96: 9%).
+//
+amdgpu.target<gfx11-generic> @scrfd_conv3x3_patch_f16_wmma_gfx11 {subgroup_size = 32}
+
+// Input height/width (NHWC, Cin_stride channels), stride, gather width and row
+// stride. k_size is K_pad = 9*Cin_pad rounded to 32; the gather zero-fills the tail.
+config.decl @scrfd.conv3x3_patch_f16_wmma.height : %value: index where [range(%value, 8, 4096), mul(%value, 8)]
+
+config.decl @scrfd.conv3x3_patch_f16_wmma.width : %value: index where [range(%value, 8, 4096), mul(%value, 8)]
+
+config.decl @scrfd.conv3x3_patch_f16_wmma.stride : %value: index where [range(%value, 1, 1)]
+
+config.decl @scrfd.conv3x3_patch_f16_wmma.cin_pad : %value: index where [range(%value, 8, 1024), mul(%value, 8)]
+
+// Physical channel stride of the input rows: the width its producer wrote,
+// which is that conv's Cout_pad (64-aligned), or 4 for the stem's converted
+// image. The gather reads only c < cin_pad inside each row, so the MMA work is
+// 9*cin_pad, not 9*cin_stride -- for an 88-channel tensor stored 128 wide that
+// is the difference between K=800 and K=1152.
+config.decl @scrfd.conv3x3_patch_f16_wmma.cin_stride : %value: index where [range(%value, 8, 1024), mul(%value, 8)]
+
+config.decl @scrfd.conv3x3_patch_f16_wmma.k_size : %value: index where [range(%value, 32, 16384), mul(%value, 32)]
+
+config.decl @scrfd.conv3x3_patch_f16_wmma.n_size : %value: index where [range(%value, 64, 8192), mul(%value, 64)]
+
+kernel.def target(@scrfd_conv3x3_patch_f16_wmma_gfx11) export("scrfd_conv3x3_patch_f16_wmma") @scrfd_conv3x3_patch_f16_wmma(%m_size: index) {
+  %c1 = index.constant 1 : index
+  %c63 = index.constant 63 : index
+  %c64 = index.constant 64 : index
+  %c256 = index.constant 256 : index
+  %n_size0 = config.get @scrfd.conv3x3_patch_f16_wmma.n_size : index
+  %m_rounded = index.add %m_size, %c63 : index
+  %m_tiles = index.div %m_rounded, %c64 : index
+  %n_tiles = index.div %n_size0, %c64 : index
+  kernel.launch.config workgroups(%n_tiles, %m_tiles, %c1) workgroup_size(%c256, %c1, %c1) : index
+} launch(%m_size: index, %a: buffer, %w: buffer, %bias: buffer, %c: buffer) {
+  %k_size0 = config.get @scrfd.conv3x3_patch_f16_wmma.k_size : index
+  %n_size0 = config.get @scrfd.conv3x3_patch_f16_wmma.n_size : index
+  %k_size = index.assume %k_size0 [range(%k_size0, 32, 8192), mul(%k_size0, 32)] : index
+  %n_size = index.assume %n_size0 [range(%n_size0, 64, 8192), mul(%n_size0, 64)] : index
+  %height = config.get @scrfd.conv3x3_patch_f16_wmma.height : index
+  %width = config.get @scrfd.conv3x3_patch_f16_wmma.width : index
+  %stride = config.get @scrfd.conv3x3_patch_f16_wmma.stride : index
+  %cin_pad = config.get @scrfd.conv3x3_patch_f16_wmma.cin_pad : index
+  %cin_stride = config.get @scrfd.conv3x3_patch_f16_wmma.cin_stride : index
+
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
+  %c16 = index.constant 16 : index
+  %c32 = index.constant 32 : index
+  %c40 = index.constant 40 : index
+  %c64 = index.constant 64 : index
+  %c256 = index.constant 256 : index
+  %c10 = index.constant 10 : index
+  %c100 = index.constant 100 : index
+  %c400 = index.constant 400 : index
+  %c31 = index.constant 31 : index
+  %c0_offset = index.constant 0 : offset
+  %lds_bytes = index.constant 18240 : offset
+  %w_stage_offset = index.constant 5120 : offset
+  %patch_offset = index.constant 10240 : offset
+  %wave_result_bytes = index.constant 1024 : offset
+  %m = index.constant 16 : index
+  %n = index.constant 16 : index
+  %k = index.constant 16 : index
+  %zero_f32x8 = vector.constant 0.0 : vector<8xf32>
+  %zero_f16x4 = vector.constant 0.0 : vector<4xf16>
+  %zero_f16x8 = vector.constant 0.0 : vector<8xf16>
+
+  %tile_n_id = kernel.workgroup.id<x> : index
+  %tile_m_id = kernel.workgroup.id<y> : index
+  %workitem = kernel.workitem.id<x> : index
+  %subgroup0 = kernel.subgroup.id : index
+  %subgroup = index.assume %subgroup0 [range(%subgroup0, 0, 7)] : index
+  %lane = kernel.subgroup.lane.id : index
+
+  %wave_m = index.div %subgroup, %c2 : index
+  %wave_n = index.rem %subgroup, %c2 : index
+  %wave_row = index.mul %wave_m, %c16 : index
+  %wave_col = index.mul %wave_n, %c32 : index
+  %wave_col1 = index.add %wave_col, %c16 : index
+  %base_m = index.mul %tile_m_id, %c64 : index
+  %base_n = index.mul %tile_n_id, %c64 : index
+
+  %a_global = buffer.assume.memory_space<global> %a : buffer
+  %w_global = buffer.assume.memory_space<global> %w : buffer
+  %bias_global = buffer.assume.memory_space<global> %bias : buffer
+  %c_global = buffer.assume.memory_space<global> %c : buffer
+  // A is the NHWC input [B*H*W][Cin_stride]; the [M][K] matrix is never formed.
+  // M = B*Ho*Wo is a launch argument -- bounded here, never with `where`.
+  %c3 = index.constant 3 : index
+  %c9 = index.constant 9 : index
+  %m_bounded = index.assume %m_size [range(%m_size, 1, 16777216)] : index
+  %ho = index.div %height, %stride : index
+  %wo = index.div %width, %stride : index
+  %plane = index.mul %ho, %wo : index
+  %images = index.div %m_bounded, %plane : index
+  %in_rows_per_image = index.mul %height, %width : index
+  %in_rows_total = index.mul %images, %in_rows_per_image : index
+  %k_real = index.mul %cin_pad, %c9 : index
+  // The M tile is an 8x8 block of output pixels: tile -> (image, block row, block col).
+  %tiles_x = index.div %width, %c8 : index
+  %tiles_y = index.div %height, %c8 : index
+  %tiles_per_image = index.mul %tiles_y, %tiles_x : index
+  %image = index.div %tile_m_id, %tiles_per_image : index
+  %tile_in_image = index.rem %tile_m_id, %tiles_per_image : index
+  %yb = index.div %tile_in_image, %tiles_x : index
+  %xb = index.rem %tile_in_image, %tiles_x : index
+  %y_base = index.mul %yb, %c8 : index
+  %x_base = index.mul %xb, %c8 : index
+  %image_rows = index.mul %image, %height : index
+  %cin_rounded = index.add %cin_pad, %c31 : index
+  %n_chunks = index.div %cin_rounded, %c32 : index
+  %c_limit = index.sub %cin_pad, %c8 : index
+  %a_view = buffer.view %a_global[%c0_offset] : buffer -> view<[%in_rows_total]x[%cin_stride]xf16>
+  %w_view = buffer.view %w_global[%c0_offset] : buffer -> view<[%n_size]x[%k_size]xf16>
+  %bias_view = buffer.view %bias_global[%c0_offset] : buffer -> view<[%n_size]xf32>
+  %c_view = buffer.view %c_global[%c0_offset] : buffer -> view<[%m_size]x[%n_size]xf16>
+
+  %lds = buffer.alloca<workgroup> align(16) %lds_bytes : buffer
+  %a_stage_view = buffer.view %lds[%c0_offset] : buffer -> view<64x40xf16>
+  %w_stage_view = buffer.view %lds[%w_stage_offset] : buffer -> view<64x40xf16>
+  // The input patch: 10x10 pixels of one 32-channel chunk, rows padded to 40 halves.
+  %patch_view = buffer.view %lds[%patch_offset] : buffer -> view<100x40xf16>
+  // The rhs fragment wants logical [k][n]; the staged weight tile is physically
+  // [n][k] with a 40-element row, so a strided layout reads it transposed.
+  %w_fragment_layout = encoding.layout.strided [1, %c40] : encoding<layout>
+  %w_fragment_view = buffer.view %lds[%w_stage_offset] : buffer -> view<32x64xf16, %w_fragment_layout>
+  %wave_result_offset = index.scale %subgroup, %wave_result_bytes : index, offset -> offset
+  %result_view = buffer.view %lds[%wave_result_offset] : buffer -> view<16x16xf32>
+
+  %load_packet = index.rem %workitem, %c4 : index
+  %load_k = index.mul %load_packet, %c8 : index
+  %load_row0 = index.div %workitem, %c4 : index
+  %load_row = index.assume %load_row0 [range(%load_row0, 0, 63)] : index
+
+  %acc_init0 = vector.fragment<init> %zero_f32x8 shape [%m, %n] : vector<8xf32>
+  %acc_init1 = vector.fragment<init> %zero_f32x8 shape [%m, %n] : vector<8xf32>
+
+  // This lane builds A row load_row = output pixel (py, px) of the block, packet
+  // load_k of the 32 channels; tap (dy, dx) reads patch pixel (py+dy, px+dx).
+  %py = index.div %load_row, %c8 : index
+  %px = index.rem %load_row, %c8 : index
+
+  %acc0, %acc1 = scf.for %chunk = [%c0 to %n_chunks step %c1](%run0 = %acc_init0 : vector<8xf32>, %run1 = %acc_init1 : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>) {
+    %chunk_base = index.mul %chunk, %c32 : index
+    // Fill the patch: 100 pixels x 4 packets of 8 channels, zero outside the
+    // image (clamp before subtracting: y0 = y_base + pyi is never negative and
+    // the pixel is inside iff 1 <= y0 <= H) and beyond Cin_pad.
+    scf.for %packet0 = [%workitem to %c400 step %c256] {
+      %packet = index.assume %packet0 [lt(%packet0, %c400)] : index
+      %pixel = index.div %packet, %c4 : index
+      %sub_packet = index.rem %packet, %c4 : index
+      %c8off = index.mul %sub_packet, %c8 : index
+      %pyi = index.div %pixel, %c10 : index
+      %pxi = index.rem %pixel, %c10 : index
+      %y0 = index.add %y_base, %pyi : index
+      %x0 = index.add %x_base, %pxi : index
+      %y_low = index.cmp uge, %y0, %c1 : index
+      %y_high = index.cmp ule, %y0, %height : index
+      %x_low = index.cmp uge, %x0, %c1 : index
+      %x_high = index.cmp ule, %x0, %width : index
+      %y_ok = scalar.andi %y_low, %y_high : i1
+      %x_ok = scalar.andi %x_low, %x_high : i1
+      %inside = scalar.andi %y_ok, %x_ok : i1
+      %c = index.add %chunk_base, %c8off : index
+      %c_ok = index.cmp ult, %c, %cin_pad : index
+      %loads = scalar.andi %inside, %c_ok : i1
+      %v = scf.if %loads -> (vector<8xf16>) {
+        %yi0 = index.sub %y0, %c1 : index
+        %xi0 = index.sub %x0, %c1 : index
+        %yi = index.assume %yi0 [lt(%yi0, %height)] : index
+        %xi = index.assume %xi0 [lt(%xi0, %width)] : index
+        %row_y0 = index.add %image_rows, %yi : index
+        %row_yw = index.mul %row_y0, %width : index
+        %in_row0 = index.add %row_yw, %xi : index
+        %in_row = index.assume %in_row0 [lt(%in_row0, %in_rows_total)] : index
+        %c_col = index.assume %c [le(%c, %c_limit), mul(%c, 8)] : index
+        %loaded = vector.load %a_view[%in_row, %c_col] : view<[%in_rows_total]x[%cin_stride]xf16> -> vector<8xf16>
+        scf.yield %loaded : vector<8xf16>
+      } else {
+        scf.yield %zero_f16x8 : vector<8xf16>
+      }
+      vector.store %v, %patch_view[%pixel, %c8off] : vector<8xf16>, view<100x40xf16>
+    }
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+
+    %tap_acc0, %tap_acc1 = scf.for %tap = [%c0 to %c9 step %c1](%t0 = %run0 : vector<8xf32>, %t1 = %run1 : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>) {
+      %dy = index.div %tap, %c3 : index
+      %dx = index.rem %tap, %c3 : index
+      // A from the patch: row (py, px) at tap (dy, dx) is patch pixel (py+dy, px+dx).
+      %ppy = index.add %py, %dy : index
+      %ppx = index.add %px, %dx : index
+      %ppix0 = index.mul %ppy, %c10 : index
+      %ppix1 = index.add %ppix0, %ppx : index
+      %ppix = index.assume %ppix1 [lt(%ppix1, %c100)] : index
+      %a_values = vector.load %patch_view[%ppix, %load_k] : view<100x40xf16> -> vector<8xf16>
+      vector.store %a_values, %a_stage_view[%load_row, %load_k] : vector<8xf16>, view<64x40xf16>
+      // W columns k = tap*Cin_pad + chunk_base .. +32; zero past K.
+      %k_tap = index.mul %tap, %cin_pad : index
+      %k_base = index.add %k_tap, %chunk_base : index
+      %source_k0 = index.add %k_base, %load_k : index
+      %k_ok = index.cmp ult, %source_k0, %k_size : index
+      %source_n = index.add %base_n, %load_row : index
+      %w_values = scf.if %k_ok -> (vector<8xf16>) {
+        %source_k = index.assume %source_k0 [lt(%source_k0, %k_size)] : index
+        %w_loaded = vector.load %w_view[%source_n, %source_k] : view<[%n_size]x[%k_size]xf16> -> vector<8xf16>
+        scf.yield %w_loaded : vector<8xf16>
+      } else {
+        scf.yield %zero_f16x8 : vector<8xf16>
+      }
+      vector.store %w_values, %w_stage_view[%load_row, %load_k] : vector<8xf16>, view<64x40xf16>
+      kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+
+      %next0, %next1 = scf.for %k_half = [%c0 to %c32 step %c16](%half0 = %t0 : vector<8xf32>, %half1 = %t1 : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>) unroll {
+        %lhs = vector.fragment.load<lhs> %a_stage_view[%wave_row, %k_half] shape [%m, %k] : view<64x40xf16> -> vector<16xf16>
+        %rhs0 = vector.fragment.load<rhs> %w_fragment_view[%k_half, %wave_col] shape [%k, %n] : view<32x64xf16, %w_fragment_layout> -> vector<16xf16>
+        %rhs1 = vector.fragment.load<rhs> %w_fragment_view[%k_half, %wave_col1] shape [%k, %n] : view<32x64xf16, %w_fragment_layout> -> vector<16xf16>
+        %out0 = vector.mma %lhs, %rhs0, %half0 : vector<16xf16>, vector<16xf16>, vector<8xf32>
+        %out1 = vector.mma %lhs, %rhs1, %half1 : vector<16xf16>, vector<16xf16>, vector<8xf32>
+        scf.yield %out0, %out1 : vector<8xf32>, vector<8xf32>
+      }
+      kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+      scf.yield %next0, %next1 : vector<8xf32>, vector<8xf32>
+    }
+    scf.yield %tap_acc0, %tap_acc1 : vector<8xf32>, vector<8xf32>
+  }
+
+  // Publish through LDS: each lane takes two vector4 slices of the 16x16 tile.
+  %publish_row0 = index.div %lane, %c4 : index
+  %publish_row1 = index.add %publish_row0, %c8 : index
+  %publish_col_group = index.rem %lane, %c4 : index
+  %publish_col = index.mul %publish_col_group, %c4 : index
+
+  scf.for %fragment = [%c0 to %c2 step %c1] {
+    %is_second = index.cmp eq, %fragment, %c1 : index
+    %chosen = scf.select %is_second, %acc1, %acc0 : vector<8xf32>
+    vector.fragment.store<result> %chosen, %result_view[%c0, %c0] shape [%m, %n] : vector<8xf32>, view<16x16xf32>
+    kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+
+    %fragment_col_offset = index.mul %fragment, %c16 : index
+    %tile_col = index.add %wave_col, %fragment_col_offset : index
+    %out_col_local = index.add %tile_col, %publish_col : index
+    %out_col = index.add %base_n, %out_col_local : index
+    %bias_values = vector.load %bias_view[%out_col] : view<[%n_size]xf32> -> vector<4xf32>
+
+    scf.for %half = [%c0 to %c2 step %c1] {
+      %row_offset = index.mul %half, %c8 : index
+      %publish_row = index.add %publish_row0, %row_offset : index
+      %values = vector.load %result_view[%publish_row, %publish_col] : view<16x16xf32> -> vector<4xf32>
+      %biased = vector.addf %values, %bias_values : vector<4xf32>
+      %row_local = index.add %wave_row, %publish_row : index
+      %opy = index.div %row_local, %c8 : index
+      %opx = index.rem %row_local, %c8 : index
+      %oy = index.add %y_base, %opy : index
+      %ox = index.add %x_base, %opx : index
+      %orow0 = index.add %image_rows, %oy : index
+      %orow_w = index.mul %orow0, %width : index
+      %out_row = index.add %orow_w, %ox : index
+      %writes = index.cmp ult, %out_row, %m_size : index
+      scf.if %writes {
+        %bounded = index.assume %out_row [lt(%out_row, %m_size)] : index
+        %narrow = vector.fptrunc %biased : vector<4xf32> to vector<4xf16>
+        vector.store %narrow, %c_view[%bounded, %out_col] : vector<4xf16>, view<[%m_size]x[%n_size]xf16>
+      }
+    }
+    kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+  }
+  kernel.return
+}

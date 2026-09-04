@@ -29,7 +29,7 @@ them derived from or copied out of dinov3-loom's matmul except the two SIMT ones
 
 | kernel | what |
 | --- | --- |
-| `conv3x3_f16_wmma` (+ `relu`, `add`, `relu_add`; and the `n128` family, a 64x128 tile used where the padded width is 128) | 3x3 conv, pad 1, stride 1 or 2, as an implicit GEMM: the WMMA matmul with its A-staging load replaced by an 8-wide im2col gather, so the `[M][K]` matrix never exists. 52 of the 58 convs, every residual/shortcut/PAFPN Add and every ReLU fused into the epilogue |
+| `conv3x3_f16_wmma` (+ `relu`, `add`, `relu_add`; and the `n128` family, a 64x128 tile used where the padded width is 128) | 3x3 conv, pad 1, stride 1 or 2, as an implicit GEMM: the WMMA matmul with its A-staging load replaced by an 8-wide im2col gather that runs one step ahead of the multiply, so the `[M][K]` matrix never exists. 52 of the 58 convs, every residual/shortcut/PAFPN Add and every ReLU fused into the epilogue |
 | `matmul_bias_f16_wmma_af16_cf16` (+ `add_resized`) | the 1x1 convs; `add_resized` is the FPN lateral with the 2x-upsampled coarser level added at `(y/2, x/2)` in the epilogue, so the Resize never exists |
 | `pool2_f16` | MaxPool and AveragePool, 2x2 stride 2 |
 | `hwc_u8_to_nhwc_f16` | the letterboxed BGR uint8 image to normalised RGB NHWC f16: `blobFromImage` and the relayout in one pass, so the host uploads bytes, never a blob |
@@ -70,18 +70,20 @@ rounds. MIGraphX's number is the network alone (`session.run` on a prepared blob
 decode would come on top). Measured on a Radeon 8060S (gfx1151) with a 10-core CPU job
 resident (load average 10 to 17), so treat the absolute numbers as a floor; MIGraphX
 itself reads anywhere from 4.95 to 6.50 ms on this box depending on the moment, and
-the ratios below use its 4.95 ms from a quieter round.
+the ratios below use its 4.95 ms from a quieter round. The conv runs at 16 to 22
+TFLOP/s on the real layers; `docs/notes.md` records the nine levers tried to get
+there, won and lost.
 
 | configuration | img/s | ms/img | vs MIGraphX |
 | --- | ---: | ---: | ---: |
-| scrfd-loom `detect_batch`, batch 32 | **405.2** | 2.47 | **2.00x** |
-| scrfd-loom `detect_batch`, batch 16 | 387.6 | 2.58 | 1.92x |
-| scrfd-loom `detect_batch`, batch 8 | 367.7 | 2.72 | 1.82x |
-| scrfd-loom `detect_batch`, batch 1 | 316.4 | 3.16 | 1.57x |
+| scrfd-loom `detect_batch`, batch 32 | **422.6** | 2.37 | **2.09x** |
+| scrfd-loom `detect_batch`, batch 16 | 410.9 | 2.43 | 2.04x |
+| scrfd-loom `detect_batch`, batch 8 | 400.6 | 2.50 | 1.98x |
+| scrfd-loom `detect_batch`, batch 1 | 334.4 | 2.99 | 1.66x |
 | onnxruntime + MIGraphX, network only, batch 1 | 201.9 | 4.95 | 1.00x |
 
 The native call alone (`host/scrfd --repeat`: upload, 57 launches, download, decode)
-is 2.23 to 2.30 ms/img at batch 16 and 2.60 at batch 1; letterbox and NMS add about 0.2, and
+is 2.03 ms/img at batch 16 and 2.46 at batch 1; letterbox and NMS add about 0.2, and
 the rest of the gap to the table is scheduling noise on this loaded box. The deployed
 ONNX graph is `[1, 3, ?, ?]`: MIGraphX cannot batch it, so its number is a latency.
 Detections are unchanged from insightface's (worst 1-IoU 0.0006, score delta 1e-4,
