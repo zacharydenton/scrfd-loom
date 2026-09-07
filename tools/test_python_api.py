@@ -73,6 +73,16 @@ def main() -> int:
     fixture = (np.array(fx["det"], np.float32), np.array(fx["kps"], np.float32))
 
     with SCRFDLoom(max_batch=2) as model:
+        handle = model._handle
+        model.prepare(0, input_size=(640, 640), det_thresh=0.6, nms_thresh=0.3)
+        check("prepare configures thresholds without replacing the session",
+              model._handle is handle and model.det_thresh == 0.6 and model.nms_thresh == 0.3)
+        require_raises(ValueError, "ctx_id=0", lambda: model.prepare(-1))
+        require_raises(ValueError, "ctx_id=0", lambda: model.prepare(1))
+        require_raises(ValueError, "640", lambda: model.prepare(0, input_size=(320, 320)))
+        require_raises(ValueError, "nms_thresh", lambda: model.prepare(0, det_thresh=0.7, nms_thresh=float("nan")))
+        check("invalid prepare options leave thresholds unchanged", model.det_thresh == 0.6 and model.nms_thresh == 0.3)
+        model.prepare(ctx_id=0, det_thresh=0.5, nms_thresh=0.4)
         assert model._native.scrfd_max_batch(model._handle) == 2
         det, kps = model.detect(img)
         check(f"detect(): {len(det)} faces vs insightface's {len(fixture[0])}", same_detections((det, kps), fixture))
@@ -191,6 +201,9 @@ def main() -> int:
     assert model.closed
     model.close()
     require_raises(SCRFDError, "closed", lambda: model.detect(img))
+    require_raises(SCRFDError, "closed", lambda: model.prepare(0))
+    require_raises(SCRFDError, "closed", lambda: model.detect_batch([]))
+    require_raises(SCRFDError, "closed", lambda: model.detect_letterboxed(np.empty((0, 640, 640, 3), np.uint8)))
     check("closed sessions refuse calls", True)
     return 0 if ok else 1
 

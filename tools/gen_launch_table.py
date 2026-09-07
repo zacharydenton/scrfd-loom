@@ -79,6 +79,12 @@ class Launch:
                 f"_c{self.cin_pad}of{self.cin_stride}_k{self.k_size}_n{self.n_size}")
 
 
+def require(condition: bool, detail) -> None:
+    """Keep graph and generator invariants active under python -O."""
+    if not condition:
+        raise ValueError(f"unsupported graph or generator input: {detail}")
+
+
 def build_schedule(graph: G.Graph):
     """Returns (ordered launches, tensor -> (H, W, storage stride), buffer bytes per image)."""
     heads = head_groups(graph)
@@ -131,7 +137,7 @@ def build_schedule(graph: G.Graph):
                 out = add.output
             relus = [c for c in consumers.get(out, []) if c.kind == "relu"]
             if relus:
-                assert variant != "add_resized", "no ReLU follows an FPN add in this graph"
+                require(variant != 'add_resized', 'no ReLU follows an FPN add in this graph')
                 variant = "relu" if variant == "plain" else "relu_add"
                 fused_relu.add(relus[0].output)
                 alias[relus[0].output] = op.output
@@ -140,7 +146,7 @@ def build_schedule(graph: G.Graph):
             _, cin, h, w = graph.shapes[op.inputs[0]]
             # The row stride of the input is whatever its producer wrote.
             cs = shapes[resolve(op.inputs[0])][2]
-            assert cs == storage_stride(cin), (op.name, cs, storage_stride(cin))
+            require(cs == storage_stride(cin), (op.name, cs, storage_stride(cin)))
             kind = "conv3x3" if op.ksize == 3 else "matmul"
             cin_pad = align(cin, CIN_ALIGN) if op.ksize == 3 else cs
             k_size = align(op.ksize * op.ksize * cin_pad, K_ALIGN)

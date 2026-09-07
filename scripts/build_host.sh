@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-hipcc="${HIPCC:-/opt/rocm/bin/hipcc}"
+hipcc="${HIPCC:-${ROCM_PATH:-/opt/rocm}/bin/hipcc}"
 mkdir -p build
 
 "$hipcc" -O2 -Wall -Werror -fPIC -shared -DSCRFD_LIBRARY -o build/libscrfd.so host/scrfd.cpp

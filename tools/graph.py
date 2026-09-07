@@ -26,8 +26,14 @@ NUM_ANCHORS = 2
 HEAD_CHANNELS = (1, 4, 10)
 
 
+def require(condition: bool, detail) -> None:
+    """Keep graph and generator invariants active under python -O."""
+    if not condition:
+        raise ValueError(f"unsupported graph or generator input: {detail}")
+
+
 def model_path() -> Path:
-    return Path(os.environ.get("SCRFD_ONNX", DEFAULT_MODEL))
+    return Path(os.environ.get("SCRFD_ONNX", DEFAULT_MODEL)).expanduser()
 
 
 @dataclass
@@ -99,9 +105,15 @@ def load(size: int = INPUT_SIZE, path: Path | None = None) -> Graph:
         if t == "Conv":
             w, b = init[n.input[1]], init[n.input[2]]
             s, p, k = a.get("strides", [1])[0], a.get("pads", [0])[0], w.shape[2]
-            assert a.get("group", 1) == 1 and a.get("dilations", [1])[0] == 1
+            require(a.get("group", 1) == 1, (n.name, "group"))
+            require(w.ndim == 4 and w.shape[2] == w.shape[3], (n.name, "weight shape", w.shape))
+            require(a.get("dilations", [1, 1]) == [1, 1], (n.name, "dilations"))
+            require(a.get("strides", [1, 1]) == [s, s], (n.name, "asymmetric strides"))
+            require(a.get("pads", [0, 0, 0, 0]) == [p, p, p, p], (n.name, "asymmetric padding"))
+            require(a.get("auto_pad", b"NOTSET") == b"NOTSET", (n.name, "auto_pad"))
+            require((k, p) in ((3, 1), (1, 0)), (n.name, "kernel/padding", k, p))
             N, C, H, W = shapes[ins[0]]
-            assert C == w.shape[1], (n.name, C, w.shape)
+            require(C == w.shape[1], (n.name, C, w.shape))
             ho, wo = (H + 2 * p - k) // s + 1, (W + 2 * p - k) // s + 1
             shapes[out] = (N, int(w.shape[0]), ho, wo)
             ops.append(Op("conv", f"c{conv_index:02d}", ins, out, weight=w.astype(np.float32),
@@ -111,26 +123,25 @@ def load(size: int = INPUT_SIZE, path: Path | None = None) -> Graph:
             shapes[out] = shapes[ins[0]]
             ops.append(Op(t.lower(), out, ins, out, out_shape=shapes[out]))
         elif t == "Add":
-            assert shapes[ins[0]] == shapes[ins[1]], (out, shapes[ins[0]], shapes[ins[1]])
+            require(shapes[ins[0]] == shapes[ins[1]], (out, shapes[ins[0]], shapes[ins[1]]))
             shapes[out] = shapes[ins[0]]
             ops.append(Op("add", out, ins, out, out_shape=shapes[out]))
         elif t == "Mul":
             const = init[n.input[1]]
-            assert const.size == 1, f"Mul {out}: expected a scalar, got {const.shape}"
+            require(const.size == 1, f'Mul {out}: expected a scalar, got {const.shape}')
             shapes[out] = shapes[ins[0]]
             ops.append(Op("mul", out, ins, out, scale=float(const.reshape(-1)[0]), out_shape=shapes[out]))
         elif t in ("MaxPool", "AveragePool"):
             k, s, p = a["kernel_shape"][0], a.get("strides", [1])[0], a.get("pads", [0])[0]
-            assert (k, s, p) == (2, 2, 0), (t, k, s, p)
+            require((k, s, p) == (2, 2, 0), (t, k, s, p))
             N, C, H, W = shapes[ins[0]]
             shapes[out] = (N, C, H // 2, W // 2)
             ops.append(Op("maxpool" if t == "MaxPool" else "avgpool", out, ins, out, out_shape=shapes[out]))
         elif t == "Resize":
-            assert a.get("mode") == b"nearest" and a.get("coordinate_transformation_mode") == b"asymmetric" \
-                and a.get("nearest_mode") == b"floor", a
+            require(a.get('mode') == b'nearest' and a.get('coordinate_transformation_mode') == b'asymmetric' and (a.get('nearest_mode') == b'floor'), a)
             N, C, H, W = shapes[ins[0]]
             target = folded[n.input[3] if len(n.input) > 3 else n.input[1]]
-            assert tuple(int(v) for v in target) == (N, C, 2 * H, 2 * W), (out, target, shapes[ins[0]])
+            require(tuple((int(v) for v in target)) == (N, C, 2 * H, 2 * W), (out, target, shapes[ins[0]]))
             shapes[out] = (N, C, 2 * H, 2 * W)
             ops.append(Op("resize2x", out, [ins[0]], out, out_shape=shapes[out]))
         elif t == "Shape":
@@ -148,13 +159,13 @@ def load(size: int = INPUT_SIZE, path: Path | None = None) -> Graph:
             else:
                 raise NotImplementedError("tensor Concat is not in this graph")
         elif t == "Transpose":
-            assert list(a["perm"]) == [2, 3, 0, 1], a
+            require(list(a['perm']) == [2, 3, 0, 1], a)
             # Paired with the Reshape that follows; recorded when it arrives.
             shapes[out] = shapes[ins[0]]
             folded[out] = np.array([-1], dtype=np.int64)   # marker: "transposed"
         elif t == "Reshape":
             src = ins[0]
-            assert src in folded and folded[src].tolist() == [-1], "Reshape not preceded by the head Transpose"
+            require(src in folded and folded[src].tolist() == [-1], 'Reshape not preceded by the head Transpose')
             width = int(init[n.input[1]][1])
             tensor = g.node[[x.output[0] for x in g.node].index(src)].input[0]
             N, C, H, W = shapes[tensor]

@@ -23,6 +23,9 @@ step() {
   if "$@"; then printf '  ok\n'; else printf '  FAILED: %s\n' "$name"; status=1; fi
 }
 
+step "fork lifecycle checks survive python -O" python3 -O tools/test_lifecycle.py
+step "graph and generator checks survive python -O" python3 -O tools/test_invariants.py
+
 step "loom sources are canonically formatted" bash -c '"$LOOM_FORMAT" --check kernels/*.loom'
 step "generated kernels match their generators" bash -c '
   python3 tools/gen_conv.py --output-dir "$tmpdir" >/dev/null &&
@@ -44,6 +47,7 @@ step "kernel build contains no stale HSACOs" bash -c '
   find build/kernels -maxdepth 1 -type f -name "*.hsaco" -printf "%f\n" | sort > "$tmpdir/actual-hsaco" &&
   cmp -s "$tmpdir/expected-hsaco" "$tmpdir/actual-hsaco"'
 step "build host programs" ./scripts/build_host.sh
+step "native GPU error recovery" python3 tools/test_native_errors.py
 
 step "uint8 bgr -> nhwc f16"   python3 tools/test_convert.py
 step "im2col"                python3 tools/test_im2col.py
@@ -76,11 +80,9 @@ step "session rejects a lying manifest" bash -c '
   [ "$rc" != 0 ] && grep -q "the kernel expects" <<<"$out"'
 
 if [ "$quick" = 0 ]; then
-  # torch is not involved here, but onnxruntime's MIGraphX build loads its own
-  # ROCm; keep the Loom runtime path off these steps as dinov3-loom does.
-  step "reference vs onnxruntime, decode vs insightface" env -u LD_LIBRARY_PATH python3 tools/test_reference.py
-  step "end to end vs onnxruntime and insightface"        env -u LD_LIBRARY_PATH python3 tools/validate.py
-  step "python api: lifecycle, ABI errors, decode, batches" env -u LD_LIBRARY_PATH python3 tools/test_python_api.py
+  step "reference vs onnxruntime, decode vs insightface" python3 tools/test_reference.py
+  step "end to end vs onnxruntime and insightface"        python3 tools/validate.py
+  step "python api: lifecycle, ABI errors, decode, batches" python3 tools/test_python_api.py
 fi
 
 printf '\n'

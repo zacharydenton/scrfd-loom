@@ -29,6 +29,12 @@ ROOT = Path(__file__).resolve().parent.parent
 CIN_ALIGN, K_ALIGN, COUT_ALIGN = 8, 32, 64   # the conv gathers vector<8xf16>
 
 
+def require(condition: bool, detail) -> None:
+    """Keep graph and generator invariants active under python -O."""
+    if not condition:
+        raise ValueError(f"unsupported graph or generator input: {detail}")
+
+
 def align(n: int, a: int) -> int:
     return (n + a - 1) // a * a
 
@@ -90,7 +96,7 @@ def head_groups(graph: G.Graph) -> dict[str, tuple[G.Op, G.Op, G.Op, float]]:
         mul = next(o for o in graph.consumers(box.output) if o.kind == "mul")
         stride = graph.size // score.out_shape[2]
         out[f"h{stride}"] = (score, box, kps, mul.scale)
-    assert sorted(out) == ["h16", "h32", "h8"], sorted(out)
+    require(sorted(out) == ['h16', 'h32', 'h8'], sorted(out))
     return out
 
 

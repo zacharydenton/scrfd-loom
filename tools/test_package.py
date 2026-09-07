@@ -22,7 +22,7 @@ def main() -> int:
                      "scrfd_loom.py", "scrfd_loom_decode.py"):
             shutil.copy2(ROOT / name, source / name)
 
-        subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation",
+        subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps",
                         str(source), "-w", str(wheels)], check=True, capture_output=True, text=True)
         wheel, = wheels.glob("*.whl")
         with zipfile.ZipFile(wheel) as archive:

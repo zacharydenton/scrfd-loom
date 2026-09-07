@@ -9,8 +9,7 @@ The graph needs four epilogues on the 3x3 conv:
 
 `residual` is an NHWC f16 tensor of the output's shape, added in the epilogue so
 none of the graph's 16 Adds is ever a launch. Each variant is produced by literal
-anchored edits, the way dinov3-loom's gen_f16_variants.py works: if the source
-moves, the assert fails loudly rather than generating something subtly wrong.
+anchored edits. Generation fails if a required source anchor is missing.
 """
 from __future__ import annotations
 
@@ -48,10 +47,16 @@ VARIANTS = {
 }
 
 
+def require(condition: bool, detail) -> None:
+    """Keep graph and generator invariants active under python -O."""
+    if not condition:
+        raise ValueError(f"unsupported graph or generator input: {detail}")
+
+
 def generate(variant: str, text: str, source: str = SOURCE, symbol: str = SYMBOL, namespace: str = NAMESPACE) -> str:
     spec = VARIANTS[variant]
     for anchor in (LAUNCH, C_GLOBAL, C_VIEW, STORE, "%zero_f16x4 = vector.constant 0.0 : vector<4xf16>"):
-        assert anchor in text, f"{source}: anchor moved\n{anchor[:90]}"
+        require(anchor in text, f'{source}: anchor moved\n{anchor[:90]}')
     out = text
     if spec["residual"]:
         out = out.replace(LAUNCH, LAUNCH_RESIDUAL)
@@ -117,7 +122,7 @@ MM_ADD_RESIZED = """        // fine row m = (b*H + y)*W + x  ->  coarse row (b*H
 
 def generate_add_resized(text: str) -> str:
     for anchor in (MM_LAUNCH, MM_N_CONFIG, MM_C_VIEW, MM_STORE):
-        assert anchor in text, f"{MM_SOURCE}: anchor moved\n{anchor[:90]}"
+        require(anchor in text, f'{MM_SOURCE}: anchor moved\n{anchor[:90]}')
     out = text.replace(MM_LAUNCH, MM_LAUNCH_COARSE).replace(MM_N_CONFIG, MM_N_CONFIG_PLUS)
     out = out.replace(MM_C_VIEW, MM_COARSE_VIEW).replace(MM_STORE, MM_ADD_RESIZED.rstrip("\n"))
     out = out.replace(MM_SYMBOL, "scrfd_matmul_add_resized_f16_wmma").replace(MM_NAMESPACE, "scrfd.matmul_add_resized_f16_wmma")

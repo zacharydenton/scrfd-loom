@@ -111,7 +111,8 @@ struct Kernel {
 
 // Loom's AMDGPU kernarg ABI: i32 scalars 4-byte aligned, pointers 8-byte aligned.
 struct KernArgs {
-    alignas(16) unsigned char bytes[128];
+    // Index arguments occupy eight bytes; scalar_i32 writes the low half.
+    alignas(16) unsigned char bytes[128] = {};
     size_t size = 0;
     void scalar_i32(int v) { size = (size + 3) & ~size_t(3); memcpy(bytes + size, &v, 4); size += 4; }
     void pointer(const void *p) { size = (size + 7) & ~size_t(7); memcpy(bytes + size, &p, 8); size += 8; }
@@ -224,7 +225,7 @@ public:
                                         " (max_batch at creation), got " + std::to_string(batch));
     }
 
-    void upload(const uint8_t *input, size_t bytes, int batch) {
+    void check_input(const uint8_t *input, size_t bytes, int batch) const {
         if (!input) throw std::invalid_argument("input must not be null");
         check_batch(batch);
         const size_t want = input_bytes(batch);
@@ -232,7 +233,6 @@ public:
             throw std::invalid_argument("input has " + std::to_string(bytes) + " bytes; batch " +
                                         std::to_string(batch) + " requires exactly " + std::to_string(want) +
                                         " (" + std::to_string(SIZE) + "x" + std::to_string(SIZE) + " BGR uint8 per image)");
-        HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)input_, (void *)input, want));
     }
 
     void forward(int batch) {
@@ -334,6 +334,7 @@ public:
     size_t session_run(const uint8_t *input, size_t bytes, int batch, float det_thresh,
                        float *candidates, size_t candidates_elements, int32_t *counts, size_t counts_elements) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (failed_) throw std::runtime_error("session is unusable after failed GPU recovery; create a new session");
         check_batch(batch);
         if (!candidates || !counts) throw std::invalid_argument("candidates and counts must not be null");
         if (!(det_thresh > 0.0f && det_thresh < 1.0f))
@@ -347,10 +348,18 @@ public:
         if (counts_elements != size_t(batch))
             throw std::invalid_argument("counts has " + std::to_string(counts_elements) + " elements; batch " +
                                         std::to_string(batch) + " requires exactly " + std::to_string(batch));
-        upload(input, bytes, batch);
-        forward(batch);
-        synchronize();
-        download_heads(batch);
+        check_input(input, bytes, batch);
+        try {
+            HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)input_, (void *)input, bytes));
+            forward(batch);
+            synchronize();
+            download_heads(batch);
+        } catch (...) {
+            // Earlier launches may still be running. Drain before releasing
+            // the session lock, and reject future runs if recovery fails.
+            if (hipDeviceSynchronize() != hipSuccess) failed_ = true;
+            throw;
+        }
         return decode(batch, det_thresh, candidates, candidates_elements / per_row, counts);
     }
 
@@ -392,6 +401,7 @@ private:
     }
 
     int max_batch_;
+    bool failed_ = false;
     std::mutex mutex_;
     std::vector<Kernel> kernels_;
     std::vector<void *> buffers_;

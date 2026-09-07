@@ -55,7 +55,7 @@ def run_loom(det_img: np.ndarray, extra_args: list[str]) -> list[np.ndarray]:
     if image.ndim == 3:
         image = image[None]
     batch, size = image.shape[0], image.shape[1]
-    env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+    env = os.environ.copy()
     with tempfile.TemporaryDirectory() as tmp:
         src, dst = Path(tmp) / "images.bin", Path(tmp) / "heads.bin"
         image.tofile(src)

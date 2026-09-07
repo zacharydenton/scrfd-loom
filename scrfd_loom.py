@@ -128,13 +128,16 @@ class SCRFDLoom:
         self.weights = _path(weights, "SCRFD_LOOM_WEIGHTS", ROOT / "build/weights")
         self.kernels = _path(kernels, "SCRFD_LOOM_KERNELS", ROOT / "build/kernels")
         self.library = _path(library, "SCRFD_LOOM_LIBRARY", ROOT / "build/libscrfd.so")
-        for path, hint in (
-            (self.library, "./scripts/build_host.sh"),
-            (self.kernels, "./scripts/build_kernels.sh"),
-            (self.weights, "python3 tools/export_weights.py"),
+        for path, environment, hint, source in (
+            (self.library, "SCRFD_LOOM_LIBRARY", "./scripts/build_host.sh", "scripts/build_host.sh"),
+            (self.kernels, "SCRFD_LOOM_KERNELS", "./scripts/build_kernels.sh", "scripts/build_kernels.sh"),
+            (self.weights, "SCRFD_LOOM_WEIGHTS", "python3 tools/export_weights.py", "tools/export_weights.py"),
         ):
             if not path.exists():
-                raise FileNotFoundError(f"{path} is missing; run: {hint}")
+                advice = f"set {environment} to its location"
+                if (ROOT / source).exists():
+                    advice += f" or run from the source checkout: {hint}"
+                raise FileNotFoundError(f"{path} is missing; {advice}")
 
         try:
             native = ctypes.CDLL(self.library)
@@ -153,6 +156,10 @@ class SCRFDLoom:
                 "rebuild it with ./scripts/build_host.sh"
             )
         self.size = native.scrfd_input_size()
+        if self.size != SIZE:
+            raise SCRFDError(f"{self.library} is built for {self.size}x{self.size}; Python expects {SIZE}x{SIZE}")
+        self.input_size = (self.size, self.size)
+        self.taskname = "detection"
 
         # The reusable host buffers come before the native session so a rare
         # NumPy allocation failure cannot strand an already-created GPU session.
@@ -216,6 +223,10 @@ class SCRFDLoom:
 
     def close(self) -> None:
         """Release all GPU allocations and loaded modules; safe to call twice."""
+        # A lock held by another parent thread cannot be acquired after fork.
+        if getattr(self, "_pid", os.getpid()) != os.getpid():
+            self._handle = None
+            return
         lock = getattr(self, "_lock", None)
         if lock is None:
             return
@@ -243,6 +254,28 @@ class SCRFDLoom:
             pass
 
     # --- insightface-compatible API ---------------------------------------------
+    def prepare(self, ctx_id: int = 0, **kwargs) -> None:
+        """Configure InsightFace thresholds on the resident 640x640 GPU session.
+
+        Only ctx_id=0 is supported; CPU fallback and device switching are not.
+        Invalid options leave the existing thresholds unchanged.
+        """
+        self._ensure_usable()
+        with self._lock:
+            self._ensure_usable()
+            if operator.index(ctx_id) != 0:
+                raise ValueError("SCRFDLoom supports ctx_id=0 only; CPU fallback and device switching are unsupported")
+            self._call_options(kwargs.get("input_size"), 0)
+            det = kwargs.get("det_thresh")
+            nms = kwargs.get("nms_thresh")
+            det = self.det_thresh if det is None else float(det)
+            nms = self.nms_thresh if nms is None else float(nms)
+            if not math.isfinite(det) or not 0.0 < det < 1.0:
+                raise ValueError("det_thresh must be strictly between 0 and 1")
+            if not math.isfinite(nms) or not 0.0 <= nms <= 1.0:
+                raise ValueError("nms_thresh must be finite and between 0 and 1")
+            self.det_thresh, self.nms_thresh = det, nms
+
     def _call_options(self, input_size, max_num) -> int:
         if input_size is not None:
             try:
@@ -266,6 +299,7 @@ class SCRFDLoom:
         """Many images, ``max_batch`` per GPU call. Returns ``[(det, kps), ...]``."""
         max_num = self._call_options(input_size, max_num)
         images = list(images_bgr)
+        self._ensure_usable()
         with self._lock:
             self._ensure_usable()
             results = []
@@ -321,6 +355,7 @@ class SCRFDLoom:
                 raise ValueError(f"image_shapes has {len(shapes)} entries for {batch} canvases")
         if max_num > 0 and metric != "max" and any(shape is None for shape in shapes):
             raise ValueError("image_shapes is required with det_scales and the default max_num metric")
+        self._ensure_usable()
         with self._lock:
             self._ensure_usable()
             results = []

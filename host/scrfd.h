@@ -55,6 +55,8 @@ int scrfd_create(const char *weights_dir, const char *kernels_dir, int max_batch
 // SCRFD_ERROR and a message naming the count; nothing is truncated silently.
 //
 // Calls on one session are serialized internally. Destruction must not race a run.
+// Failed launches trigger synchronization before returning. If recovery fails,
+// subsequent runs are rejected; destroy the session after resolving the GPU error.
 int scrfd_run(scrfd_session *session, const uint8_t *input, size_t input_bytes, int batch,
               float det_thresh, float *candidates, size_t candidates_elements,
               int32_t *counts, size_t counts_elements, char *error, size_t error_capacity);

@@ -124,6 +124,12 @@ PRELUDE = """  // Hoisted out of the k-loop: this workitem stages tile rows load
 """
 
 
+def require(condition: bool, detail) -> None:
+    """Keep graph and generator invariants active under python -O."""
+    if not condition:
+        raise ValueError(f"unsupported graph or generator input: {detail}")
+
+
 def widen_gather(s: str, ns: str) -> str:
     """The derived kernel stages A as the matmul did: 256 lanes, two passes of 32
     rows x 8 packets of vector<4xf16>. Re-map to one pass of 64 rows x 4 packets
@@ -133,7 +139,7 @@ def widen_gather(s: str, ns: str) -> str:
     real layers (docs/notes.md, Lever 3)."""
     def sub(a: str, b: str) -> None:
         nonlocal s
-        assert a in s, a[:70]
+        require(a in s, a[:70])
         s = s.replace(a, b, 1)
     for name in ("cin_pad", "cin_stride"):
         sub(f"config.decl @{ns}.{name} : %value: index where [range(%value, 4, 1024), mul(%value, 4)]",
@@ -184,7 +190,7 @@ def widen_tile(s: str, ns: str) -> str:
     which is why tile_for() gives it only n_size == 128 (docs/notes.md, Lever 4)."""
     def sub(a: str, b: str) -> None:
         nonlocal s
-        assert a in s, a[:80]
+        require(a in s, a[:80])
         s = s.replace(a, b, 1)
     sub("  %n_tiles = index.div %n_size0, %c64 : index",
         "  %c128_cfg = index.constant 128 : index\n  %n_tiles = index.div %n_size0, %c128_cfg : index")
@@ -218,7 +224,7 @@ def widen_tile(s: str, ns: str) -> str:
     sub("  %acc0, %acc1 = scf.for %k_base = [%c0 to %k_size step %c32](%run0 = %acc_init0 : vector<8xf32>, %run1 = %acc_init1 : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>) {",
         "  %acc0, %acc1, %acc2, %acc3 = scf.for %k_base = [%c0 to %k_size step %c32](%run0 = %acc_init0 : vector<8xf32>, %run1 = %acc_init1 : vector<8xf32>, %run2 = %acc_init2 : vector<8xf32>, %run3 = %acc_init3 : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {")
     m = re.search(r"^( *)%source_n = index\.add %base_n, %row : index\n\1%w_values = vector\.load %w_view\[%source_n, %source_k\] : view<\[%n_size\]x\[%k_size\]xf16> -> vector<8xf16>\n\1vector\.store %w_values, %w_stage_view\[%row, %load_k\] : vector<8xf16>, view<64x40xf16>\n", s, re.M)
-    assert m, "W staging block"
+    require(m, 'W staging block')
     ind = m.group(1)
     s = s[:m.start()] + f"""{ind}scf.for %w_half = [%c0 to %c2 step %c1] {{
 {ind}  %w_row_offset = index.mul %w_half, %c64 : index
@@ -252,13 +258,13 @@ def prefetch(s: str, ns: str) -> str:
     128-wide tile stages W in two passes; its loop is unrolled into two carried
     packets."""
     hdr = re.search(r"^  (%acc0[^=]*)= scf\.for %k_base = \[%c0 to %k_size step %c32\]\((.*?)\) -> \((.*?)\) \{\n", s, re.M)
-    assert hdr, "k-loop header"
+    require(hdr, 'k-loop header')
     results, iters, types = hdr.group(1).strip(), hdr.group(2), hdr.group(3)
     i = hdr.end()
     barrier = "    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)\n"
     j = s.index(barrier, i)
     block = s[i:j]
-    assert "%source_k = index.add %k_base, %load_k : index" in block
+    require('%source_k = index.add %k_base, %load_k : index' in block, 'unsupported graph or generator input')
     prelude = ""
     w_loop = re.search(r"^ *scf\.for %w_half = \[%c0 to %c2 step %c1\] \{\n(?:.*\n)*? *\}\n", block, re.M)
     if w_loop:   # the 128-wide tile: two W rows per lane, explicit
@@ -275,7 +281,7 @@ def prefetch(s: str, ns: str) -> str:
     loads = block
     for name in carried:
         m = re.search(r"^ *vector\.store " + re.escape(name) + r",.*\n", loads, re.M)
-        assert m, name
+        require(m, name)
         stores[name] = m.group(0)
         loads = loads.replace(m.group(0), "")
     # the prefetch of the step after the last must not read past K
@@ -316,7 +322,7 @@ def prefetch(s: str, ns: str) -> str:
            + store_lines + barrier + "    %k_next = index.add %k_base, %c32 : index\n" + body)
     k = s.index("    %next0, %next1", j)
     y = re.search(r"^    scf\.yield (%next0[^:]*) : ([^\n]*)\n", s[k:], re.M)
-    assert y, "k-loop yield"
+    require(y, 'k-loop yield')
     e = k + y.start()
     return (s[:hdr.start()] + new + s[k:e]
             + f"    scf.yield {y.group(1)}, {', '.join(nxt)} : {y.group(2)}, {', '.join(['vector<8xf16>'] * len(carried))}\n"
@@ -334,7 +340,7 @@ def derive(target: str) -> str:
 
     def sub(old: str, new: str) -> None:
         nonlocal s
-        assert s.count(old) == 1, f"{src_stem}: anchor x{s.count(old)}:\n{old[:110]}"
+        require(s.count(old) == 1, f'{src_stem}: anchor x{s.count(old)}:\n{old[:110]}')
         s = s.replace(old, new)
 
     sub(f"config.decl @{ns}.k_size : %value: index where [range(%value, 32, 8192), mul(%value, 32)]",
