@@ -1,132 +1,101 @@
-# scrfd-loom
+# scrfd-hrx
 
-InsightFace's `det_10g` face detector (SCRFD-10GF) implemented in
-[Loom](https://github.com/ROCm/hrx-system) for the AMD Radeon 8060S (gfx1151).
-It returns face boxes, scores and five landmarks from BGR images.
+InsightFace det_10g (SCRFD-10GF) inference in Rust, using [hrx-rs](https://github.com/zacharydenton/hrx-rs)
+for GPU execution and Loom compilation. One Cargo package provides the library
+and CLI. Weights, kernels, activation buffers and readback storage stay resident;
+HRX graphs are recorded once per encountered batch size and replayed.
 
-The network uses f16 weights and activations with f32 accumulation. Preprocessing,
-anchor decoding and non-maximum suppression follow InsightFace. Weights, kernels
-and GPU buffers stay resident between calls. Combine it with
-[arcface-loom](https://github.com/zacharydenton/arcface-loom) for face embeddings.
-
-## Performance and validation
-
-Recorded on a Radeon 8060S, best of three interleaved rounds with other CPU work
-running. SCRFD-Loom includes letterboxing, inference, decode and NMS on 1280×886
-images. **The MIGraphX baseline measures the network only**, on a prepared blob.
-
-| Runtime | Batch | Images/s | ms/image |
-| --- | ---: | ---: | ---: |
-| scrfd-loom `detect_batch` | 1 | 334.4 | 2.99 |
-| scrfd-loom `detect_batch` | 8 | 400.6 | 2.50 |
-| scrfd-loom `detect_batch` | 16 | 410.9 | 2.43 |
-| scrfd-loom `detect_batch` | 32 | 422.6 | 2.37 |
-| ONNX Runtime + MIGraphX, network only | 1 | 201.9 | 4.95 |
-
-The supplied ONNX graph has a fixed batch dimension of 1. Loom supports batches
-up to 64. See [`tools/benchmark.py`](tools/benchmark.py) for the timing procedure.
-
-On InsightFace's sample image, validation finds the same six faces as its
-reference fixture: worst box IoU error (`1 − IoU`) **0.0006**, score difference
-**0.0001**, and landmark difference **0.02 pixels**. All nine network outputs
-are also compared with ONNX Runtime. Individual kernels use a float64 NumPy
-reference. These are regression checks on a small fixture, not a detection
-accuracy evaluation; validate representative images before changing a pipeline.
-
-## Build
-
-Requires Linux x86-64, a gfx1151 GPU, ROCm, Python 3.11+, the Loom compiler, and
-`det_10g.onnx` from InsightFace's `buffalo_l` pack.
-
-Follow the [build guide](docs/building.md) to build the pinned public compiler
-revision and obtain and verify the model. Then, from this checkout:
+Requires Rust 1.88+, Linux x86-64 and a Radeon 8060S (`gfx1151`). HRX 0.4.0
+provisions its verified runtime and compiler bundle; its native Linux bundle
+requires glibc 2.43 or newer. Model files are supplied separately.
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m pip install -e .
-source scripts/env.sh
-python tools/export_weights.py
-python tools/gen_launch_table.py
-./scripts/build_kernels.sh
-./scripts/build_host.sh
-./scripts/test.sh
+cargo build --release
 ```
 
-`test.sh` rebuilds the assets and runs the full suite. `--quick` skips the final
-ONNX Runtime, fixture and Python API comparisons; it still needs the GPU and
-model. Standard CPU ONNX Runtime suffices for validation. The benchmark needs
-an ONNX Runtime build with MIGraphX.
+## Library
 
-The wheel contains the Python loader and decode module. Outside a checkout,
-set `SCRFD_LOOM_WEIGHTS`, `SCRFD_LOOM_KERNELS` and `SCRFD_LOOM_LIBRARY` to the
-exported weights, compiled kernels and `libscrfd.so`. Build and runtime overrides
-are in the [build guide](docs/building.md#paths-and-runtime-selection).
+Load the original `det_10g.onnx` from InsightFace's `buffalo_l` pack.
+`onnx-protobuf` parses ONNX; the importer validates the supported graph, packs
+weights and derives the fused launch schedule and buffer assignments.
 
-## Python API
+```rust,no_run
+use scrfd_hrx::{Scrfd, Options, Image, DetectionOptions};
 
-```python
-from scrfd_loom import SCRFDLoom
-
-with SCRFDLoom(max_batch=16) as model:
-    model.prepare(ctx_id=0, input_size=(640, 640), det_thresh=0.5)
-    boxes, landmarks = model.detect(image_bgr)
-    results = model.detect_batch(images_bgr)
+# fn main() -> anyhow::Result<()> {
+let mut model = Scrfd::load("det_10g.onnx", Options::default())?;
+let bgr = vec![0u8; 640 * 640 * 3];
+let faces = model.detect(
+    Image { bgr: &bgr, width: 640, height: 640 },
+    DetectionOptions::default(),
+)?;
+// Each Detection contains bbox [x1,y1,x2,y2], score and five [x,y] landmarks.
+# Ok(())
+# }
 ```
 
-`boxes` has shape `(N, 5)`: `x1, y1, x2, y2, score`. `landmarks` has shape
-`(N, 5, 2)`. Coordinates refer to the original image. `detect_batch` returns one
-`(boxes, landmarks)` pair per image, processing up to `max_batch` at a time.
+Images are packed uint8 BGR. The detector resizes to fit 640×640 with bilinear
+interpolation, pads the right and bottom with black, and returns coordinates in
+the original image. `detect_batch` chunks images at the resident batch limit.
+`detect_letterboxed` accepts packed 640×640 BGR canvases, positive resize scales
+and original `[width, height]` values when preprocessing is already done.
 
-`prepare()` is optional. It accepts `ctx_id=0`, `input_size=(640, 640)`,
-`det_thresh` and `nms_thresh`; CPU fallback and other input sizes or device IDs
-are rejected. Defaults are 0.5 for detection and 0.4 for NMS. The candidate
-capacity is 4096 per image; overflow raises an error. Increase `max_candidates`
-at construction if needed.
+`Options` selects device index and resident batch (default 16, range 1–64).
+Activation storage is 33.4 MB per resident image, plus input, weights and
+readback storage. `DetectionOptions` defaults to score threshold 0.5, NMS
+threshold 0.4 and capacity 4096 candidates per image; overflow returns an error.
+`max_detections = 0` keeps all detections. Otherwise `Ranking::AreaAndCenter`
+uses InsightFace's area/centre preference; `Ranking::Area` ranks by box area.
+NMS uses inclusive coordinates. Empty batches return empty results.
 
-`detect(image, input_size=None, max_num=0, metric="default")` follows
-InsightFace's area/centre ranking when limiting detections; `metric="max"`
-ranks by area. `input_size` may be `None` or `(640, 640)`.
+The returned landmarks can be passed directly to
+[arcface-hrx](https://github.com/zacharydenton/arcface-hrx) for alignment and
+face embeddings.
 
-For an existing `FaceAnalysis` pipeline, replace both detector references:
+## CLI
 
-```python
-with SCRFDLoom() as model:
-    app.models["detection"] = app.det_model = model
-    app.prepare(ctx_id=0, det_size=(640, 640))
-    faces = app.get(image_bgr)
+```bash
+cargo run --release -- --model det_10g.onnx \
+  --input image.png --output faces.json
 ```
 
-If your pipeline already letterboxes images, use
-`detect_letterboxed(canvases, det_scales)`. Canvases must be `(B, 640, 640, 3)`
-uint8 BGR, with content aligned to the top left. Supply original `(height, width)`
-values in `image_shapes` when using the default `max_num` ranking with scales.
-Keep preprocessing consistent when comparing results between implementations.
+The CLI reads PNG or JPEG images and writes detections as JSON. Add
+`--benchmark 100` for timings. Image decoding is outside the timed calls.
 
-Calls on one model are serialized and thread-safe. Use `close()` or a context
-manager to release GPU resources, and create sessions after forking. The
-ONNX-specific `session`, `model_file` and raw `forward` interfaces are not provided.
-Other GPUs are unvalidated.
+## Execution and validation
 
-## Implementation
+Inference requires `&mut` access to the model. A model owns its stream; use
+separate models for independent concurrent callers. GPU failures return errors
+and make the session unusable. Drop releases owned resources through HRX.
+The fixed production kernels are validated only for `gfx1151`.
 
-The ONNX graph generates the launch schedule and five activation buffers
-(33.4 MB per image). Fused convolutions, FPN additions, pools and input conversion
-reduce the graph to 57 launches. The native host decodes candidate detections;
-Python performs letterboxing and NMS.
+Warm calls reuse compiled kernels, device allocations and graphs. Uploads are
+queued; readback copies share the inference stream and complete before host
+access. Graph dependencies preserve launch order and activation-buffer reuse.
+`benchmark` reports alternating graph/direct forward timings, excluding transfers;
+the CLI also reports warm end-to-end timing. Both are synchronized host timings,
+not hardware timestamp measurements. See [current measurements](docs/benchmark-2026-09-10.md).
 
-- [`kernels/`](kernels/): Loom convolution, conversion and pooling kernels.
-- [`host/`](host/): resident C ABI, detector CLI and kernel test runner.
-- [`tools/`](tools/): graph parsing, export, generation, reference and tests.
-- [Engineering notes](docs/notes.md): implementation details and measurements.
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+SCRFD_MODEL=/path/to/det_10g.onnx \
+  cargo test --release -- --include-ignored --test-threads=1
+```
+
+CPU tests run without a GPU or model files. Ignored tests require the model and
+hardware; they cover numerical agreement, changing inputs, partial batches and
+graph replay. The unfused ONNX reference runs in float64 Rust. All nine head outputs
+must exceed cosine 0.9999, with maximum error below 0.02 for scores and 0.15
+for distances. Fixture detections require box IoU above 0.99, score error below
+0.01 and landmark error below one pixel.
+
+The lossless fixture preserves the pixels used for the original reference;
+JPEG decoders can produce different pixels. These small fixtures establish
+numerical agreement, not accuracy on other face datasets.
 
 ## License
 
-Project code is [Apache-2.0](LICENSE). InsightFace-derived preprocessing and
-postprocessing use MIT; see [third-party notices](THIRD_PARTY_NOTICES.md).
-
-Model weights have separate terms. InsightFace distributes `buffalo_l` for
-non-commercial research; other uses require appropriate model licensing.
-Neither the ONNX model nor exported weights are included. See
-[InsightFace's policy](https://github.com/deepinsight/insightface#license).
+Project code is Apache-2.0. Model weights have separate terms and are not
+included or downloaded by this crate. See [third-party notices](THIRD_PARTY_NOTICES.md)
+for model terms and retained source attribution.

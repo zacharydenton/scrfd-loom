@@ -1,0 +1,222 @@
+use crate::{
+    engine::{Engine, Launch, Region},
+    plan::{Op, Plan},
+};
+use anyhow::{Result, ensure};
+use hrx::loom::Specialization;
+use std::collections::HashMap;
+pub(crate) struct Cnn {
+    pub engine: Engine,
+    pub input: Region,
+    pub outputs: Vec<Region>,
+    pub max_batch: usize,
+    ops: Vec<Op>,
+    buffers: Vec<Region>,
+    weights: HashMap<String, Region>,
+}
+impl Cnn {
+    pub fn new(plan: Plan, device: i32, max_batch: usize) -> Result<Self> {
+        ensure!((1..=64).contains(&max_batch), "max_batch must be 1..=64");
+        let mut engine = Engine::new(device)?;
+        let mut weights = HashMap::new();
+        for (name, data) in plan.weights {
+            weights.insert(name, engine.weight(&data)?);
+        }
+        let input = engine.allocate(max_batch * SIZE * SIZE * 3)?;
+        let buffers = plan
+            .buffers
+            .iter()
+            .map(|n| engine.allocate(n * max_batch))
+            .collect::<Result<Vec<_>>>()?;
+        let outputs = plan.outputs.iter().map(|i| buffers[*i]).collect();
+        engine.reserve_readback(max_batch * (80 * 80 + 40 * 40 + 20 * 20) * 64 * 2)?;
+        let specs = plan.ops.iter().map(specification).collect::<Vec<_>>();
+        engine.compile(&specs)?;
+        Ok(Self {
+            engine,
+            input,
+            outputs,
+            max_batch,
+            ops: plan.ops,
+            buffers,
+            weights,
+        })
+    }
+    pub fn run(&mut self, input: &[u8]) -> Result<usize> {
+        ensure!(
+            input.len().is_multiple_of(SIZE * SIZE * 3),
+            "input must contain complete {SIZE}×{SIZE} BGR images"
+        );
+        let batch = input.len() / (SIZE * SIZE * 3);
+        ensure!((1..=self.max_batch).contains(&batch), "invalid batch size");
+        if !self.engine.graphs.contains_key(&batch) {
+            let mut launches = vec![];
+            for (kernel, l) in self.ops.iter().enumerate() {
+                let src = if l.src_buf == usize::MAX {
+                    self.input
+                } else {
+                    self.buffers[l.src_buf]
+                };
+                let dst = self.buffers[l.dst_buf];
+                let m = batch * l.ho * l.wo;
+                let (scalar, grid, bindings) = match l.kind {
+                    "convert" => (
+                        batch * l.h,
+                        [batch as u32 * l.h as u32, 1, 1],
+                        vec![src, dst],
+                    ),
+                    "pool" => (m, [(batch * l.ho) as u32, 1, 1], vec![src, dst]),
+                    "reduce" => (
+                        batch,
+                        [batch as u32, 1, 1],
+                        vec![src, self.weights[&(l.name.clone() + "_b")], dst],
+                    ),
+                    _ => {
+                        let mut args = vec![
+                            src,
+                            self.weights[&l.name],
+                            self.weights[&(l.name.clone() + "_b")],
+                            dst,
+                        ];
+                        if l.extra_buf != usize::MAX {
+                            args.push(self.buffers[l.extra_buf]);
+                        }
+                        if l.slope {
+                            args.push(self.weights[&(l.name.clone() + "_slope")]);
+                        }
+                        let m = if l.kind == "head" { batch } else { m };
+                        (
+                            m,
+                            [
+                                (l.n / if l.kind == "conv" { l.tile } else { 64 }) as u32,
+                                m.div_ceil(64) as u32,
+                                if l.kind == "head" { l.splits as u32 } else { 1 },
+                            ],
+                            args,
+                        )
+                    }
+                };
+                launches.push(Launch {
+                    kernel,
+                    scalar: scalar as u32,
+                    grid,
+                    bindings,
+                });
+            }
+            self.engine.record(batch, &launches, None)?;
+        }
+        self.engine.upload(self.input, input)?;
+        self.engine.replay(batch)?;
+        Ok(batch)
+    }
+}
+fn specification(l: &Op) -> (&'static str, Specialization) {
+    let (source, symbol, namespace) = match l.kind {
+        "convert" => (
+            "hwc_u8_to_nhwc_f16".to_owned(),
+            format!("{MODEL}_hwc_u8_to_nhwc_f16"),
+            format!("{MODEL}.hwc_u8_to_nhwc_f16"),
+        ),
+        "pool" => (
+            "pool2_f16".into(),
+            "scrfd_pool2_f16".into(),
+            "scrfd.pool2_f16".into(),
+        ),
+        "head" => (
+            "matmul_splitk_f16_wmma".into(),
+            "arcface_matmul_splitk_f16_wmma".into(),
+            "arcface.matmul_splitk_f16_wmma".into(),
+        ),
+        "reduce" => (
+            "splitk_reduce_f32".into(),
+            "arcface_splitk_reduce_f32".into(),
+            "arcface.splitk_reduce_f32".into(),
+        ),
+        "matmul" if l.variant == "plain" => (
+            "matmul_bias_f16_wmma_af16_cf16".into(),
+            "dinov3_matmul_bias_f16_wmma_af16_cf16".into(),
+            "dinov3.matmul_bias_f16_wmma_af16_cf16".into(),
+        ),
+        "matmul" => (
+            "matmul_add_resized_f16_wmma".into(),
+            "scrfd_matmul_add_resized_f16_wmma".into(),
+            "scrfd.matmul_add_resized_f16_wmma".into(),
+        ),
+        _ => {
+            let base = if l.tile == 128 {
+                "conv3x3_n128_f16_wmma"
+            } else {
+                "conv3x3_f16_wmma"
+            };
+            let src = if l.variant == "plain" {
+                base.to_owned()
+            } else {
+                format!("{base}_{}", l.variant)
+            };
+            let symbol = format!("{MODEL}_{src}");
+            let ns = format!("{MODEL}.{src}");
+            (src, symbol, ns)
+        }
+    };
+    let mut spec = Specialization::new(symbol);
+    let mut put = |name: &str, value: usize| {
+        spec.config
+            .insert(format!("{namespace}.{name}"), value.to_string());
+    };
+    match l.kind {
+        "convert" => put("size", SIZE),
+        "pool" => {
+            put("height", l.h);
+            put("width", l.w);
+            put("channels", l.cin_stride);
+            put("take_max", usize::from(l.variant == "max"));
+        }
+        "head" => {
+            put("k_size", l.k);
+            put("n_size", l.n);
+            put("splits", l.splits);
+        }
+        "reduce" => {
+            put("n_size", l.n);
+            put("splits", l.splits);
+        }
+        _ => {
+            put("k_size", l.k);
+            put("n_size", l.n);
+            if l.kind == "conv" || l.variant == "add_resized" {
+                put("height", l.h);
+                put("width", l.w);
+            }
+            if l.kind == "conv" {
+                put("stride", l.stride);
+                put("cin_pad", l.cin_pad);
+                put("cin_stride", l.cin_stride);
+            }
+        }
+    }
+    (kernel_source(&source), spec)
+}
+
+const SIZE: usize = 640;
+const MODEL: &str = "scrfd";
+fn kernel_source(name: &str) -> &'static str {
+    match name {
+        "conv3x3_f16_wmma" => include_str!("../kernels/conv3x3_f16_wmma.loom"),
+        "conv3x3_f16_wmma_add" => include_str!("../kernels/conv3x3_f16_wmma_add.loom"),
+        "conv3x3_f16_wmma_relu" => include_str!("../kernels/conv3x3_f16_wmma_relu.loom"),
+        "conv3x3_f16_wmma_relu_add" => include_str!("../kernels/conv3x3_f16_wmma_relu_add.loom"),
+        "conv3x3_n128_f16_wmma_relu" => include_str!("../kernels/conv3x3_n128_f16_wmma_relu.loom"),
+        "conv3x3_n128_f16_wmma_relu_add" => {
+            include_str!("../kernels/conv3x3_n128_f16_wmma_relu_add.loom")
+        }
+        "hwc_u8_to_nhwc_f16" => include_str!("../kernels/hwc_u8_to_nhwc_f16.loom"),
+        "matmul_add_resized_f16_wmma" => {
+            include_str!("../kernels/matmul_add_resized_f16_wmma.loom")
+        }
+        "matmul_bias_f16_wmma_af16_cf16" => {
+            include_str!("../kernels/matmul_bias_f16_wmma_af16_cf16.loom")
+        }
+        "pool2_f16" => include_str!("../kernels/pool2_f16.loom"),
+        _ => unreachable!("unknown production kernel"),
+    }
+}

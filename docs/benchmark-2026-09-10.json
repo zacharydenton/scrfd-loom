@@ -1,0 +1,38 @@
+{
+  "date": "2026-09-10",
+  "gpu": "Radeon 8060S gfx1151",
+  "hrx": "0.4.0",
+  "batch": 1,
+  "timings": [
+    {
+      "samples": 100,
+      "graph": {
+        "median_ms": 2.325102,
+        "p95_ms": 2.340462
+      },
+      "direct": {
+        "median_ms": 2.342761,
+        "p95_ms": 2.358411
+      }
+    },
+    {
+      "median_ms": 3.090593,
+      "p95_ms": 3.138981,
+      "samples": 100,
+      "scope": "warm end-to-end, including transfers",
+      "setup_ms": 275.635966
+    }
+  ],
+  "old_python_api": {
+    "median_ms": 2.868237002985552,
+    "p95_ms": 3.0479515466140583,
+    "samples": 100,
+    "scope": "old Python API end-to-end"
+  },
+  "old_host_with_hrx_compiler": {
+    "median_ms": 2.837398002156988,
+    "p95_ms": 2.950846968451515,
+    "samples": 100,
+    "scope": "old Python API end-to-end"
+  }
+}

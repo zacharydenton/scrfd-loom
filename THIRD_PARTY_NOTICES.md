@@ -2,7 +2,7 @@
 
 ## InsightFace source code
 
-`tools/decode.py` and `scrfd_loom_decode.py` contain preprocessing and
+`src/detection.rs` contains preprocessing and
 post-processing code derived from the InsightFace project:
 
 - Project: <https://github.com/deepinsight/insightface>
@@ -39,3 +39,10 @@ describes its supplied pretrained models as available for non-commercial
 research use unless separate authorization is obtained. Users are responsible
 for reviewing the model terms at <https://github.com/deepinsight/insightface>
 and obtaining any permission their use requires.
+
+## Validation fixture
+
+`tests/fixtures/t1.png` preserves the decoded pixels of InsightFace's
+[`t1.jpg`](https://github.com/deepinsight/insightface/blob/7fadd420c2351d0ffa8cac403421c1a3ed733365/python-package/insightface/data/images/t1.jpg).
+The accompanying JSON records the existing InsightFace reference results.
+These retain the InsightFace MIT attribution above. No model weights are included.
