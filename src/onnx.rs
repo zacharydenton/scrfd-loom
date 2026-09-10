@@ -229,11 +229,21 @@ impl Network {
                 n.op_type
             );
             let input = || net.shape(&n.input[0]);
+            let ranked_input = |rank: usize| -> Result<&[usize]> {
+                let s = input()?;
+                ensure!(
+                    s.len() == rank,
+                    "{}: expected rank-{rank} input, found rank-{}",
+                    n.op_type,
+                    s.len()
+                );
+                Ok(s)
+            };
             let shape = match n.op_type.as_str() {
                 "Conv" => {
                     ensure!(n.input.len() == 3, "convolution must include bias");
                     let w = net.tensor(&n.input[1])?.shape()?;
-                    let s = input()?;
+                    let s = ranked_input(4)?;
                     ensure!(
                         w.len() == 4 && s.len() == 4 && w[1] == s[1] && w[2] == w[3],
                         "invalid convolution shape"
@@ -285,6 +295,10 @@ impl Network {
                         "unsupported BatchNorm"
                     );
                     let s = input()?.to_vec();
+                    ensure!(
+                        s.len() >= 2,
+                        "BatchNormalization requires a channel dimension"
+                    );
                     for t in &n.input[1..] {
                         ensure!(net.tensor(t)?.shape()? == [s[1]], "invalid BatchNorm shape");
                     }
@@ -292,11 +306,10 @@ impl Network {
                 }
                 "PRelu" => {
                     ensure!(n.input.len() == 2, "invalid PRelu");
-                    ensure!(
-                        net.tensor(&n.input[1])?.count()? == input()?[1],
-                        "invalid slope"
-                    );
-                    input()?.to_vec()
+                    let s = input()?;
+                    ensure!(s.len() >= 2, "PRelu requires a channel dimension");
+                    ensure!(net.tensor(&n.input[1])?.count()? == s[1], "invalid slope");
+                    s.to_vec()
                 }
                 "Relu" | "Sigmoid" => input()?.to_vec(),
                 "Add" => {
@@ -321,7 +334,7 @@ impl Network {
                             && [0, 1].contains(&n.i("ceil_mode", 0)),
                         "unsupported pool"
                     );
-                    let s = input()?;
+                    let s = ranked_input(4)?;
                     ensure!(
                         s[2].is_multiple_of(2) && s[3].is_multiple_of(2),
                         "pool requires even spatial dimensions"
@@ -330,7 +343,9 @@ impl Network {
                 }
                 "Flatten" => {
                     ensure!(n.i("axis", 1) == 1, "unsupported flatten");
-                    vec![1, input()?[1..].iter().product()]
+                    let s = input()?;
+                    ensure!(!s.is_empty(), "Flatten requires a non-scalar input");
+                    vec![1, s[1..].iter().product()]
                 }
                 "Gemm" => {
                     ensure!(
@@ -342,10 +357,9 @@ impl Network {
                         "unsupported Gemm"
                     );
                     let w = net.tensor(&n.input[1])?.shape()?;
+                    let s = ranked_input(2)?;
                     ensure!(
-                        w.len() == 2
-                            && input()?[1] == w[1]
-                            && net.tensor(&n.input[2])?.shape()? == [w[0]],
+                        w.len() == 2 && s[1] == w[1] && net.tensor(&n.input[2])?.shape()? == [w[0]],
                         "invalid Gemm shape"
                     );
                     vec![1, w[0]]
@@ -419,7 +433,7 @@ impl Network {
                             && n.input.len() == 4,
                         "unsupported Resize"
                     );
-                    let s = input()?;
+                    let s = ranked_input(4)?;
                     let out = vec![1, s[1], s[2] * 2, s[3] * 2];
                     ensure!(
                         folded.get(&n.input[3]) == Some(&out.iter().map(|x| *x as i64).collect()),
@@ -429,7 +443,7 @@ impl Network {
                 }
                 "Transpose" => {
                     ensure!(n.ints("perm", &[]) == [2, 3, 0, 1], "unsupported transpose");
-                    let s = input()?;
+                    let s = ranked_input(4)?;
                     vec![s[2], s[3], s[0], s[1]]
                 }
                 "Reshape" => {

@@ -1,0 +1,151 @@
+{
+  "baseline_commit": "c3e6249505a9ea23b0fc1a40f6522d30735f3197",
+  "device": "Radeon 8060S (gfx1151)",
+  "hrx_version": "0.4.0",
+  "runtime_bundle": "b439d533ec0a95651198687fbf14eaafd7831ca670b052b87aedcf3a185c4ed0",
+  "batch": 1,
+  "max_batch": 16,
+  "input": "tests/fixtures/t1.png",
+  "warmups": 10,
+  "samples_per_run": 300,
+  "rounds": 3,
+  "clock": "synchronized host wall clock",
+  "binaries_sha256": {
+    "baseline": "53809eaaa2b3fea08ae89781f1e1c54f0f65abc025837c30935ec0547ab3abb6",
+    "optimized": "010590390e001b95f428ef994cbc9e3c7fe56bbdbeafdf35012dafae511b315f"
+  },
+  "runs": [
+    {
+      "round": 0,
+      "name": "baseline",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.2227200000000003,
+          "p95_ms": 2.23931
+        },
+        "direct": {
+          "median_ms": 2.3254479999999997,
+          "p95_ms": 2.347317
+        }
+      },
+      "end": {
+        "median_ms": 2.724807,
+        "p95_ms": 2.780605,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 265.22193300000004
+      }
+    },
+    {
+      "round": 0,
+      "name": "optimized",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.158192,
+          "p95_ms": 2.175831
+        },
+        "direct": {
+          "median_ms": 2.2570699999999997,
+          "p95_ms": 2.278259
+        }
+      },
+      "end": {
+        "median_ms": 2.641989,
+        "p95_ms": 2.694688,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 124.627985
+      }
+    },
+    {
+      "round": 1,
+      "name": "optimized",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.122053,
+          "p95_ms": 2.1354830000000002
+        },
+        "direct": {
+          "median_ms": 2.22525,
+          "p95_ms": 2.24257
+        }
+      },
+      "end": {
+        "median_ms": 2.643649,
+        "p95_ms": 2.692668,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 123.955743
+      }
+    },
+    {
+      "round": 1,
+      "name": "baseline",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.24214,
+          "p95_ms": 2.2602490000000004
+        },
+        "direct": {
+          "median_ms": 2.350937,
+          "p95_ms": 2.369326
+        }
+      },
+      "end": {
+        "median_ms": 2.7363560000000002,
+        "p95_ms": 2.7914849999999998,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 131.226768
+      }
+    },
+    {
+      "round": 2,
+      "name": "baseline",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.24121,
+          "p95_ms": 2.259359
+        },
+        "direct": {
+          "median_ms": 2.3480570000000003,
+          "p95_ms": 2.370126
+        }
+      },
+      "end": {
+        "median_ms": 2.709647,
+        "p95_ms": 2.782605,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 121.126499
+      }
+    },
+    {
+      "round": 2,
+      "name": "optimized",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.132553,
+          "p95_ms": 2.156892
+        },
+        "direct": {
+          "median_ms": 2.2324900000000003,
+          "p95_ms": 2.250639
+        }
+      },
+      "end": {
+        "median_ms": 2.658769,
+        "p95_ms": 2.7155069999999997,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 127.692323
+      }
+    }
+  ]
+}

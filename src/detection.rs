@@ -1,8 +1,9 @@
 use anyhow::{Result, ensure};
 use serde::Serialize;
+/// Packed RGB pixels, three bytes per pixel with no row padding.
 #[derive(Clone, Copy, Debug)]
 pub struct Image<'a> {
-    pub bgr: &'a [u8],
+    pub rgb: &'a [u8],
     pub width: usize,
     pub height: usize,
 }
@@ -15,8 +16,8 @@ impl Image<'_> {
                     .width
                     .checked_mul(self.height)
                     .and_then(|n| n.checked_mul(3))
-                    == Some(self.bgr.len()),
-            "invalid BGR image size"
+                    == Some(self.rgb.len()),
+            "invalid RGB image size"
         );
         Ok(())
     }
@@ -92,7 +93,7 @@ pub(crate) fn letterbox_into(
     let source = ImageRef::new(
         u32::try_from(image.width)?,
         u32::try_from(image.height)?,
-        image.bgr,
+        image.rgb,
         PixelType::U8x3,
     )?;
     let mut target = ResizeImage::from_slice_u8(640, 640, out, PixelType::U8x3)?;

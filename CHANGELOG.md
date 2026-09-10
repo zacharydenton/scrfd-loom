@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reject unsupported SCRFD head pipelines and invalid tensor ranks during model loading instead of silently changing scores or panicking.
+- Accept RGB throughout: rename `Image::bgr` to `Image::rgb` and pass RGB canvases to `detect_letterboxed`. BGR callers must swap red and blue before calling.
+- Normalize and pad each input pixel with one vector store in the GPU preprocessing kernel.
+- Use a 32-channel implicit-GEMM tile for the two 28-channel stem convolutions, preserving zeroed 64-channel storage.
 - Fetch pinned pretrained weights through the shared Hugging Face cache by default; retain local-file and offline loading.
 - Require Rust 1.91 for the HF Hub 1.0 dependency stack.
 

@@ -1,4 +1,4 @@
-//! SCRFD det_10g face detection on packed BGR images. Boxes and landmarks
+//! SCRFD det_10g face detection on packed RGB images. Boxes and landmarks
 //! are returned in original-image coordinates.
 mod cnn;
 pub mod detection;
@@ -107,7 +107,7 @@ impl Scrfd {
         self.canvas = canvas;
         result
     }
-    /// Top-left-aligned 640×640 BGR canvases, their resize scales and original `[width, height]` values.
+    /// Top-left-aligned 640×640 RGB canvases, their resize scales and original `[width, height]` values.
     pub fn detect_letterboxed(
         &mut self,
         canvases: &[u8],

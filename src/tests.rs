@@ -1,9 +1,59 @@
 use super::*;
 #[test]
+#[ignore = "requires gfx1151"]
+fn rgb_conversion_and_padding() -> Result<()> {
+    use crate::engine::{Engine, Launch};
+    use hrx::loom::Specialization;
+
+    let mut engine = Engine::new(0)?;
+    let input = engine.allocate_io(32 * 3)?;
+    let output = engine.allocate_io(32 * 8 * 2)?;
+    let mut spec = Specialization::new("scrfd_hwc_u8_to_nhwc_f16");
+    spec.config
+        .insert("scrfd.hwc_u8_to_nhwc_f16.size".into(), "16".into());
+    engine.compile(&[(include_str!("../kernels/hwc_u8_to_nhwc_f16.loom"), spec)])?;
+    engine.record(
+        1,
+        &[Launch {
+            kernel: 0,
+            scalar: 2,
+            grid: [2, 1, 1],
+            bindings: vec![input, output],
+            output: output.buffer,
+        }],
+    )?;
+    // Unequal channels catch accidental RGB/BGR reversal. Replay with changed
+    // colors also checks that every channel, including padding, is overwritten.
+    for seed in [0, 73] {
+        let rgb: Vec<u8> = (0..32 * 3).map(|i| ((i * 37 + seed) % 256) as u8).collect();
+        engine.upload(input, &rgb)?;
+        engine.upload(output, &vec![0xff; output.bytes])?;
+        engine.replay(1)?;
+        let mut bytes = vec![0u8; output.bytes];
+        engine.read_many(&mut [(output, &mut bytes)])?;
+        for (p, pixel) in bytes.chunks_exact(16).enumerate() {
+            for (c, value) in pixel.chunks_exact(2).enumerate() {
+                let expected = if c < 3 {
+                    (rgb[p * 3 + c] as f32 - 127.5) / 128.
+                } else {
+                    0.
+                };
+                assert_eq!(
+                    half::f16::from_le_bytes([value[0], value[1]]),
+                    half::f16::from_f32(expected),
+                    "pixel {p}, channel {c}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn preprocessing_and_detection_edges() {
     assert!(
         detection::letterbox(Image {
-            bgr: &[],
+            rgb: &[],
             width: 0,
             height: 0
         })
@@ -11,7 +61,7 @@ fn preprocessing_and_detection_edges() {
     );
     let img = vec![127u8; 640 * 640 * 3];
     let (out, scale) = detection::letterbox(Image {
-        bgr: &img,
+        rgb: &img,
         width: 640,
         height: 640,
     })
@@ -71,7 +121,7 @@ fn native_reference_and_replay() -> Result<()> {
         for y in 0..640 {
             for x in 0..640 {
                 blob[(c * 640 + y) * 640 + x] =
-                    (canvas[(y * 640 + x) * 3 + 2 - c] as f64 - 127.5) / 128.;
+                    (canvas[(y * 640 + x) * 3 + c] as f64 - 127.5) / 128.;
             }
         }
     }
@@ -159,6 +209,160 @@ fn malformed_onnx_returns_errors() {
     };
     assert!(onnx::Network::from_bytes(&model.write_to_bytes().unwrap(), 112).is_err());
 }
+
+#[test]
+fn malformed_operator_ranks_return_errors() -> Result<()> {
+    use onnx_protobuf::{
+        AttributeProto, GraphProto, Message, ModelProto, NodeProto, ValueInfoProto,
+    };
+    let ints = |name: &str, values: &[i64]| AttributeProto {
+        name: name.into(),
+        ints: values.into(),
+        ..Default::default()
+    };
+    let text = |name: &str, value: &str| AttributeProto {
+        name: name.into(),
+        s: value.as_bytes().into(),
+        ..Default::default()
+    };
+    for op in ["MaxPool", "AveragePool", "Resize", "Transpose"] {
+        let (inputs, attribute) = match op {
+            "Resize" => (
+                vec!["flat", "", "", "sizes"],
+                vec![
+                    text("mode", "nearest"),
+                    text("coordinate_transformation_mode", "asymmetric"),
+                    text("nearest_mode", "floor"),
+                ],
+            ),
+            "Transpose" => (vec!["flat"], vec![ints("perm", &[2, 3, 0, 1])]),
+            _ => (
+                vec!["flat"],
+                vec![ints("kernel_shape", &[2, 2]), ints("strides", &[2, 2])],
+            ),
+        };
+        let graph = GraphProto {
+            input: vec![ValueInfoProto {
+                name: "x".into(),
+                ..Default::default()
+            }],
+            node: vec![
+                NodeProto {
+                    op_type: "Flatten".into(),
+                    input: vec!["x".into()],
+                    output: vec!["flat".into()],
+                    ..Default::default()
+                },
+                NodeProto {
+                    op_type: op.into(),
+                    input: inputs.into_iter().map(String::from).collect(),
+                    output: vec!["y".into()],
+                    attribute,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let model = ModelProto {
+            graph: Some(graph).into(),
+            ..Default::default()
+        };
+        // A panic fails the test; require the error to identify the rank issue.
+        let error = onnx::Network::from_bytes(&model.write_to_bytes()?, 640)
+            .err()
+            .expect("invalid rank accepted");
+        assert!(
+            error
+                .to_string()
+                .contains("expected rank-4 input, found rank-2"),
+            "{op}: {error}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires pretrained weights; CPU model import"]
+fn importer_rejects_modified_head_pipelines() -> Result<()> {
+    use onnx_protobuf::{Message, ModelProto, NodeProto, TensorProto};
+    let original = ModelProto::parse_from_bytes(&std::fs::read(model_path()?)?)?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("modified.onnx");
+    for mutation in [
+        "scale_scores",
+        "replace_sigmoid",
+        "wrong_reshape",
+        "wrong_outputs",
+        "unused_operation",
+    ] {
+        let mut modified = original.clone();
+        let graph = modified.graph.as_mut().unwrap();
+        graph.initializer.push(TensorProto {
+            name: "review_scale".into(),
+            dims: vec![1],
+            data_type: 1,
+            float_data: vec![0.5],
+            ..Default::default()
+        });
+        let sigmoid = graph
+            .node
+            .iter()
+            .position(|n| n.op_type == "Sigmoid")
+            .unwrap();
+        match mutation {
+            "scale_scores" => {
+                let output = graph.node[sigmoid].output[0].clone();
+                graph.node[sigmoid].output[0] = "unscaled_scores".into();
+                graph.node.insert(
+                    sigmoid + 1,
+                    NodeProto {
+                        op_type: "Mul".into(),
+                        input: vec!["unscaled_scores".into(), "review_scale".into()],
+                        output: vec![output],
+                        ..Default::default()
+                    },
+                );
+            }
+            "replace_sigmoid" => {
+                graph.node[sigmoid].op_type = "Mul".into();
+                graph.node[sigmoid].input.push("review_scale".into());
+            }
+            "wrong_reshape" => {
+                let reshape = graph
+                    .node
+                    .iter_mut()
+                    .find(|n| n.op_type == "Reshape")
+                    .unwrap();
+                reshape.input[1] = "review_shape".into();
+                graph.initializer.push(TensorProto {
+                    name: "review_shape".into(),
+                    dims: vec![2],
+                    data_type: 7,
+                    int64_data: vec![-1, 4],
+                    ..Default::default()
+                });
+            }
+            "wrong_outputs" => graph.output[0].name = graph.input[0].name.clone(),
+            _ => graph.node.push(NodeProto {
+                op_type: "Mul".into(),
+                input: vec![graph.input[0].name.clone(), "review_scale".into()],
+                output: vec!["unused".into()],
+                ..Default::default()
+            }),
+        }
+        std::fs::write(&path, modified.write_to_bytes()?)?;
+        // Each variant is shape-valid ONNX; rejection must happen in the SCRFD importer.
+        onnx::Network::load(&path, 640)?;
+        let error = model::load(&path)
+            .err()
+            .expect("modified pipeline accepted");
+        assert!(
+            error.to_string().contains("head") || error.to_string().contains("unfused"),
+            "{mutation}: {error}"
+        );
+    }
+    Ok(())
+}
 #[test]
 #[ignore = "requires pretrained weights and gfx1151"]
 fn insightface_fixture() -> Result<()> {
@@ -168,10 +372,7 @@ fn insightface_fixture() -> Result<()> {
     let kps: Vec<[[f32; 2]; 5]> = serde_json::from_value(fixture["kps"].clone())?;
     let image = image::load_from_memory(include_bytes!("../tests/fixtures/t1.png"))?.to_rgb8();
     let (w, h) = image.dimensions();
-    let mut bgr = image.into_raw();
-    for p in bgr.chunks_exact_mut(3) {
-        p.swap(0, 2);
-    }
+    let rgb = image.into_raw();
     let mut model = Scrfd::load(
         model_path()?,
         Options {
@@ -180,7 +381,7 @@ fn insightface_fixture() -> Result<()> {
         },
     )?;
     let image = Image {
-        bgr: &bgr,
+        rgb: &rgb,
         width: w as usize,
         height: h as usize,
     };

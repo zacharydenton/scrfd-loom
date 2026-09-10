@@ -1,15 +1,6 @@
-// The stem's input conversion. The input is the letterboxed BGR uint8 image
-// insightface's detect() builds, [B*S*S] pixels of 3 bytes; the output is NHWC
-// f16 with the channel count padded to 8, RGB, normalised -- blobFromImage's
-// (x - 127.5) / 128 with swapRB -- so the stem conv's 8-wide gather reads one
-// aligned packet per pixel per tap. Doing the normalisation here means the host uploads
-// bytes (1.2 MB per image) instead of a normalised f32 blob four times larger,
-// and never builds that blob at all.
-//
-//   out[p, c] = c < 3 ? (in[p, 2 - c] - 127.5) / 128 : 0   for c < 8
-//
-// One workgroup per image row (b, y); 256 workitems stride the S pixels.
-// Bandwidth-trivial, so scalar loads and stores.
+// Normalize packed, letterboxed RGB uint8 pixels to NHWC f16, padded to eight
+// channels. Each pixel is (RGB - 127.5) / 128 followed by five zeros.
+// One vector store publishes the complete aligned pixel for the stem gather.
 
 amdgpu.target<gfx11-generic> @scrfd_hwc_u8_to_nhwc_gfx11 {subgroup_size = 32}
 
@@ -33,8 +24,7 @@ kernel.def target(@scrfd_hwc_u8_to_nhwc_gfx11) export("scrfd_hwc_u8_to_nhwc_f16"
   %mean = scalar.constant 127.5 : f32
   %inv_std = scalar.constant 0.0078125 : f32
 
-  // row_count = B*S is a launch argument; bound it in the body, never with a
-  // `where` on the launch (that miscompiles under hipModuleLaunchKernel).
+  // row_count includes every image in the batch.
   %rows = index.assume %row_count [range(%row_count, 1, 1048576)] : index
   %row_raw = kernel.workgroup.id<x> : index
   %workitem = kernel.workitem.id<x> : index
@@ -56,9 +46,9 @@ kernel.def target(@scrfd_hwc_u8_to_nhwc_gfx11) export("scrfd_hwc_u8_to_nhwc_f16"
       %pixel0 = index.add %out_base, %x : index
       %pixel = index.assume %pixel0 [lt(%pixel0, %pixel_rows)] : index
 
-      %b8 = view.load %input_view[%pixel, %c0] : view<[%pixel_rows]x[%c3]xi8> -> i8
+      %r8 = view.load %input_view[%pixel, %c0] : view<[%pixel_rows]x[%c3]xi8> -> i8
       %g8 = view.load %input_view[%pixel, %c1] : view<[%pixel_rows]x[%c3]xi8> -> i8
-      %r8 = view.load %input_view[%pixel, %c2] : view<[%pixel_rows]x[%c3]xi8> -> i8
+      %b8 = view.load %input_view[%pixel, %c2] : view<[%pixel_rows]x[%c3]xi8> -> i8
       %b32 = scalar.extui %b8 : i8 to i32
       %g32 = scalar.extui %g8 : i8 to i32
       %r32 = scalar.extui %r8 : i8 to i32
@@ -75,13 +65,8 @@ kernel.def target(@scrfd_hwc_u8_to_nhwc_gfx11) export("scrfd_hwc_u8_to_nhwc_f16"
       %g_half = scalar.fptrunc %g_scaled : f32 to f16
       %r_half = scalar.fptrunc %r_scaled : f32 to f16
 
-      // swapRB: the output row is R, G, B, then five zeros.
-      view.store %r_half, %output_view[%pixel, %c0] : f16, view<[%pixel_rows]x[%c8]xf16>
-      view.store %g_half, %output_view[%pixel, %c1] : f16, view<[%pixel_rows]x[%c8]xf16>
-      view.store %b_half, %output_view[%pixel, %c2] : f16, view<[%pixel_rows]x[%c8]xf16>
-      scf.for %pad = [%c3 to %c8 step %c1] {
-        view.store %zero_half, %output_view[%pixel, %pad] : f16, view<[%pixel_rows]x[%c8]xf16>
-      }
+      %packed = vector.from_elements %r_half, %g_half, %b_half, %zero_half, %zero_half, %zero_half, %zero_half, %zero_half : vector<8xf16>
+      vector.store %packed, %output_view[%pixel, %c0] : vector<8xf16>, view<[%pixel_rows]x[%c8]xf16>
     }
   }
   kernel.return

@@ -1,5 +1,5 @@
 use crate::{
-    onnx::{Network, NodeExt, TensorExt},
+    onnx::{Network, Node, NodeExt, TensorExt},
     plan::*,
 };
 use anyhow::{Context, Result, ensure};
@@ -41,6 +41,23 @@ pub(crate) fn load(path: &Path) -> Result<Plan> {
         "expected three score/box/landmark heads"
     );
     let members: HashSet<_> = heads.values().flat_map(|g| g.values().copied()).collect();
+    // Only discard head operators whose semantics are implemented by packing
+    // or decoding. Every terminal must be one of the nine declared outputs.
+    let mut fused = HashSet::new();
+    let mut head_scales = HashMap::new();
+    let mut head_outputs = HashSet::new();
+    for group in heads.values() {
+        for (&channels, &i) in group {
+            let (output, scale) = validate_head(&net, &net.graph.node[i], channels, &mut fused)?;
+            ensure!(head_outputs.insert(output), "duplicate head output");
+            head_scales.insert(i, scale);
+        }
+    }
+    let declared_outputs: HashSet<_> = net.graph.output.iter().map(|v| v.name.clone()).collect();
+    ensure!(
+        head_outputs == declared_outputs,
+        "expected only SCRFD head outputs"
+    );
     let mut weights = HashMap::new();
     let mut aliases = HashMap::from([(net.graph.input[0].name.clone(), "nhwc_input".into())]);
     let mut ops = vec![Op {
@@ -55,7 +72,6 @@ pub(crate) fn load(path: &Path) -> Result<Plan> {
         bytes: 640 * 640 * 8 * 2,
         ..Default::default()
     }];
-    let mut fused = HashSet::new();
     let mut index = 0;
     for (i, node) in net.graph.node.iter().enumerate() {
         match node.op_type.as_str() {
@@ -82,8 +98,13 @@ pub(crate) fn load(path: &Path) -> Result<Plan> {
                         .producer(&add.input[1])
                         .context("missing residual producer")?;
                     if other.op_type == "Resize" {
+                        ensure!(
+                            net.consumers(other.out()).count() == 1,
+                            "unfused Resize consumer"
+                        );
                         variant = "add_resized";
                         extra = other.input[0].clone();
+                        fused.insert(other.out().to_string());
                     } else {
                         variant = "add";
                         extra = add.input[1].clone();
@@ -150,7 +171,14 @@ pub(crate) fn load(path: &Path) -> Result<Plan> {
                     n,
                     ho: out[2],
                     wo: out[3],
-                    tile: if n == 128 { 128 } else { 64 },
+                    // The 28-channel stem needs only half the usual WMMA tile.
+                    tile: if co <= 32 && taps == 9 && variant == "relu" {
+                        32
+                    } else if n == 128 {
+                        128
+                    } else {
+                        64
+                    },
                     bytes: out[2] * out[3] * n * 2,
                     ..Default::default()
                 });
@@ -186,8 +214,25 @@ pub(crate) fn load(path: &Path) -> Result<Plan> {
             other => anyhow::bail!("unsupported SCRFD operator {other}"),
         }
     }
+    // Resize can precede the convolution that absorbs it, so check coverage
+    // after all fusions have been identified. Shape operators are CPU-folded.
+    for node in &net.graph.node {
+        if matches!(
+            node.op_type.as_str(),
+            "Mul" | "Sigmoid" | "Transpose" | "Reshape" | "Resize"
+        ) {
+            ensure!(fused.contains(node.out()), "unfused {}", node.op_type);
+        }
+    }
     let mut ordered_heads: Vec<_> = heads.into_iter().collect();
     ordered_heads.sort_by_key(|(src, _)| std::cmp::Reverse(net.shapes[src][2]));
+    ensure!(
+        ordered_heads
+            .iter()
+            .zip([80, 40, 20])
+            .all(|((src, _), size)| { net.shapes[src][2..] == [size, size] }),
+        "expected head resolutions 80, 40 and 20"
+    );
     let mut outputs = vec![];
     for (src, g) in ordered_heads {
         let s = net.shape(&src)?;
@@ -209,15 +254,7 @@ pub(crate) fn load(path: &Path) -> Result<Plan> {
                     && n.ints("strides", &[1, 1]) == [1, 1],
                 "invalid head convolution"
             );
-            let scale = if co == 8 {
-                let mul = net
-                    .consumers(n.out())
-                    .find(|n| n.op_type == "Mul")
-                    .context("missing box scale")?;
-                net.tensor(&mul.input[1])?.floats()?[0]
-            } else {
-                1.
-            };
+            let scale = head_scales[&g[&co]];
             // The old export multiplies float32 before conversion to half.
             w.extend(
                 net.tensor(&n.input[1])?
@@ -258,4 +295,43 @@ pub(crate) fn load(path: &Path) -> Result<Plan> {
         });
     }
     finish(ops, aliases, weights, &outputs)
+}
+
+fn validate_head(
+    net: &Network,
+    head: &Node,
+    channels: usize,
+    fused: &mut HashSet<String>,
+) -> Result<(String, f64)> {
+    let pipeline: &[&str] = match channels {
+        2 => &["Transpose", "Reshape", "Sigmoid"],
+        8 => &["Mul", "Transpose", "Reshape"],
+        20 => &["Transpose", "Reshape"],
+        _ => anyhow::bail!("unsupported head channels"),
+    };
+    let mut output = head.out();
+    let mut scale = 1.;
+    for expected in pipeline {
+        let mut consumers = net.consumers(output);
+        let node = consumers.next().context("incomplete SCRFD head pipeline")?;
+        ensure!(
+            consumers.next().is_none() && node.op_type == *expected && node.input[0] == output,
+            "unsupported SCRFD head pipeline: expected only {expected} after {output}"
+        );
+        if node.op_type == "Reshape" {
+            ensure!(
+                net.tensor(&node.input[1])?.integers()? == [-1, (channels / 2) as i64],
+                "incorrect SCRFD head reshape"
+            );
+        } else if node.op_type == "Mul" {
+            scale = net.tensor(&node.input[1])?.floats()?[0];
+        }
+        fused.insert(node.out().to_string());
+        output = node.out();
+    }
+    ensure!(
+        net.consumers(output).next().is_none(),
+        "unsupported operation after SCRFD head"
+    );
+    Ok((output.to_string(), scale))
 }

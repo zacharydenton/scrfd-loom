@@ -37,10 +37,7 @@ fn main() -> Result<()> {
     };
     let image = image::load_from_memory(&input)?.to_rgb8();
     let (width, height) = image.dimensions();
-    let mut bgr = image.into_raw();
-    for p in bgr.chunks_exact_mut(3) {
-        p.swap(0, 2);
-    }
+    let rgb = image.into_raw();
     let mut model = Scrfd::load(
         &model_path,
         Options {
@@ -54,7 +51,7 @@ fn main() -> Result<()> {
             "{}",
             serde_json::to_string(&model.benchmark(
                 Image {
-                    bgr: &bgr,
+                    rgb: &rgb,
                     width: width as usize,
                     height: height as usize
                 },
@@ -65,7 +62,7 @@ fn main() -> Result<()> {
     let mut run = || {
         model.detect(
             Image {
-                bgr: &bgr,
+                rgb: &rgb,
                 width: width as usize,
                 height: height as usize,
             },

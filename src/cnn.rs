@@ -63,7 +63,7 @@ impl Cnn {
     pub fn run(&mut self, input: &[u8]) -> Result<usize> {
         ensure!(
             input.len().is_multiple_of(SIZE * SIZE * 3),
-            "input must contain complete {SIZE}×{SIZE} BGR images"
+            "input must contain complete {SIZE}×{SIZE} RGB images"
         );
         let batch = input.len() / (SIZE * SIZE * 3);
         ensure!((1..=self.max_batch).contains(&batch), "invalid batch size");
@@ -106,7 +106,13 @@ impl Cnn {
                         (
                             m,
                             [
-                                (l.n / if l.kind == "conv" { l.tile } else { 64 }) as u32,
+                                (if l.tile == 32 {
+                                    // The narrow kernel computes 32 channels and
+                                    // zeroes the rest of its 64-channel storage.
+                                    1
+                                } else {
+                                    l.n / if l.kind == "conv" { l.tile } else { 64 }
+                                }) as u32,
                                 m.div_ceil(64) as u32,
                                 if l.kind == "head" { l.splits as u32 } else { 1 },
                             ],
@@ -162,7 +168,9 @@ fn specification(l: &Op) -> (&'static str, Specialization) {
             "scrfd.matmul_add_resized_f16_wmma".into(),
         ),
         _ => {
-            let base = if l.tile == 128 {
+            let base = if l.tile == 32 {
+                "conv3x3_n32_f16_wmma"
+            } else if l.tile == 128 {
                 "conv3x3_n128_f16_wmma"
             } else {
                 "conv3x3_f16_wmma"
@@ -220,6 +228,7 @@ const SIZE: usize = 640;
 const MODEL: &str = "scrfd";
 fn kernel_source(name: &str) -> &'static str {
     match name {
+        "conv3x3_n32_f16_wmma_relu" => include_str!("../kernels/conv3x3_n32_f16_wmma_relu.loom"),
         "conv3x3_f16_wmma" => include_str!("../kernels/conv3x3_f16_wmma.loom"),
         "conv3x3_f16_wmma_add" => include_str!("../kernels/conv3x3_f16_wmma_add.loom"),
         "conv3x3_f16_wmma_relu" => include_str!("../kernels/conv3x3_f16_wmma_relu.loom"),
