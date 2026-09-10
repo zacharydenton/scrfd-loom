@@ -24,17 +24,18 @@ pub(crate) struct Launch {
     pub scalar: u32,
     pub grid: [u32; 3],
     pub bindings: Vec<Region>,
+    pub output: usize,
 }
 pub(crate) struct Engine {
-    pub stream: Stream,
-    pub buffers: Vec<Buffer>,
-    pub kernels: Vec<Kernel>,
+    stream: Stream,
+    buffers: Vec<Buffer>,
+    kernels: Vec<Kernel>,
     pub graphs: HashMap<usize, GraphExec>,
     cache: Kernels,
     launches: HashMap<usize, Vec<Launch>>,
-    clears: HashMap<usize, Option<Region>>,
     failed: bool,
-    readback: Option<Buffer>,
+    shared: std::collections::HashSet<usize>,
+    pending: bool,
 }
 impl Engine {
     pub fn new(index: i32) -> Result<Self> {
@@ -52,9 +53,9 @@ impl Engine {
             graphs: HashMap::new(),
             cache: Kernels::new(compiler),
             launches: HashMap::new(),
-            clears: HashMap::new(),
             failed: false,
-            readback: None,
+            shared: Default::default(),
+            pending: false,
         })
     }
     pub fn allocate(&mut self, bytes: usize) -> Result<Region> {
@@ -84,21 +85,14 @@ impl Engine {
         self.stream.synchronize()?;
         Ok(())
     }
-    pub fn record(
-        &mut self,
-        batch: usize,
-        launches: &[Launch],
-        clear: Option<Region>,
-    ) -> Result<()> {
+    pub fn record(&mut self, batch: usize, launches: &[Launch]) -> Result<()> {
         ensure!(!self.failed, "session is unusable after a GPU failure");
         if self.graphs.contains_key(&batch) {
             return Ok(());
         }
         let mut graph = self.stream.graph()?;
-        let mut after = vec![];
-        if let Some(r) = clear {
-            after.push(graph.fill(&[], self.buffers[r.buffer].try_slice(r.offset, r.bytes)?, 0)?);
-        }
+        let mut writers = vec![None; self.buffers.len()];
+        let mut readers = vec![Vec::new(); self.buffers.len()];
         for l in launches {
             let k = &self.kernels[l.kernel];
             let constants = Constants::indices(k, &[l.scalar])?;
@@ -107,8 +101,16 @@ impl Engine {
                 .iter()
                 .map(|r| self.buffers[r.buffer].try_slice(r.offset, r.bytes))
                 .collect::<hrx::Result<Vec<_>>>()?;
-            // The model validates shapes and sizes before recording. Each node follows
-            // its predecessor, including all reads preceding a reused-buffer write.
+            // Depend on prior writers and on every reader of a reused output.
+            // Independent branches can overlap without racing the activation pool.
+            let mut after = readers[l.output].clone();
+            for r in &l.bindings {
+                if let Some(writer) = writers[r.buffer]
+                    && !after.contains(&writer)
+                {
+                    after.push(writer);
+                }
+            }
             let node = unsafe {
                 graph.dispatch(
                     &after,
@@ -119,12 +121,16 @@ impl Engine {
                     &bindings,
                 )?
             };
-            after.clear();
-            after.push(node);
+            readers[l.output].clear();
+            writers[l.output] = Some(node);
+            for r in &l.bindings {
+                if r.buffer != l.output && !readers[r.buffer].contains(&node) {
+                    readers[r.buffer].push(node);
+                }
+            }
         }
         self.graphs.insert(batch, graph.finish()?);
         self.launches.insert(batch, launches.to_vec());
-        self.clears.insert(batch, clear);
         Ok(())
     }
     pub fn benchmark(&mut self, batch: usize, samples: usize) -> Result<ForwardTimings> {
@@ -135,13 +141,10 @@ impl Engine {
             for mode in [i % 2, 1 - i % 2] {
                 let start = std::time::Instant::now();
                 let result = (|| -> Result<()> {
+                    self.pending = true;
                     if mode == 0 {
                         self.replay(batch)?;
                     } else {
-                        if let Some(r) = self.clears[&batch] {
-                            self.stream
-                                .fill(self.buffers[r.buffer].try_slice(r.offset, r.bytes)?, 0)?;
-                        }
                         for l in &self.launches[&batch] {
                             let k = &self.kernels[l.kernel];
                             let constants = Constants::indices(k, &[l.scalar])?;
@@ -162,7 +165,7 @@ impl Engine {
                             }
                         }
                     }
-                    self.stream.synchronize()?;
+                    self.wait()?;
                     Ok(())
                 })();
                 if result.is_err() {
@@ -188,20 +191,42 @@ impl Engine {
             direct: summarize(direct),
         })
     }
+    pub fn allocate_io(&mut self, bytes: usize) -> Result<Region> {
+        let i = self.buffers.len();
+        self.buffers.push(self.stream.allocate_shared(bytes)?);
+        self.shared.insert(i);
+        Ok(Region::whole(i, bytes))
+    }
     pub fn upload(&mut self, r: Region, bytes: &[u8]) -> Result<()> {
         ensure!(!self.failed, "session is unusable after a GPU failure");
+        ensure!(self.shared.contains(&r.buffer), "input must be shared");
+        self.buffers[r.buffer].try_slice(r.offset, bytes.len())?;
         ensure!(bytes.len() <= r.bytes, "input exceeds allocated region");
-        let result = self.stream.upload(
-            self.buffers[r.buffer].try_slice(r.offset, bytes.len())?,
-            bytes,
-        );
-        if result.is_err() {
-            self.failed = true;
+        self.wait()?;
+        let pointer = self.buffers[r.buffer].device_ptr()?.cast::<u8>();
+        ensure!(!pointer.is_null(), "null host input pointer");
+        // The private allocation is host-local and coherent on gfx1151. No GPU
+        // work is in flight and caller memory cannot alias it. Submission follows
+        // this host write, so the graph sees the complete input.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.add(r.offset), bytes.len());
         }
-        Ok(result?)
+        Ok(())
+    }
+    fn wait(&mut self) -> Result<()> {
+        ensure!(!self.failed, "session is unusable after a GPU failure");
+        if self.pending {
+            if let Err(e) = self.stream.synchronize() {
+                self.failed = true;
+                return Err(e.into());
+            }
+            self.pending = false;
+        }
+        Ok(())
     }
     pub fn replay(&mut self, batch: usize) -> Result<()> {
         ensure!(!self.failed, "session is unusable after a GPU failure");
+        self.pending = true;
         let result = self.stream.launch(
             self.graphs
                 .get_mut(&batch)
@@ -212,57 +237,22 @@ impl Engine {
         }
         Ok(result?)
     }
-    pub fn reserve_readback(&mut self, bytes: usize) -> Result<()> {
-        self.readback = Some(self.stream.allocate_shared(bytes)?);
-        Ok(())
-    }
     pub fn read_many(&mut self, outputs: &mut [(Region, &mut [u8])]) -> Result<()> {
-        ensure!(!self.failed, "session is unusable after a GPU failure");
-        let buffer = self
-            .readback
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("readback was not reserved"))?;
-        let total = outputs.iter().try_fold(0usize, |n, (_, out)| {
-            n.checked_add(out.len())
-                .ok_or_else(|| anyhow::anyhow!("readback size overflow"))
-        })?;
-        ensure!(
-            total <= buffer.bytes(),
-            "readback exceeds reserved capacity"
-        );
-        for (r, out) in outputs.iter() {
+        self.wait()?;
+        for (r, out) in outputs {
+            ensure!(self.shared.contains(&r.buffer), "output must be shared");
+            self.buffers[r.buffer].try_slice(r.offset, out.len())?;
             ensure!(out.len() <= r.bytes, "output exceeds allocated region");
-        }
-        let result = (|| -> Result<()> {
-            let mut offset = 0;
-            for (r, out) in outputs.iter() {
-                self.stream.copy(
-                    buffer.try_slice(offset, out.len())?,
-                    self.buffers[r.buffer].try_slice(r.offset, out.len())?,
-                )?;
-                offset += out.len();
+            let pointer = self.buffers[r.buffer].device_ptr()?.cast::<u8>();
+            ensure!(!pointer.is_null(), "null host output pointer");
+            // Every requested byte is a model output written by the completed
+            // graph. Host-local coherent storage is CPU-addressable on gfx1151;
+            // private allocations cannot alias the caller's output slices.
+            unsafe {
+                std::ptr::copy_nonoverlapping(pointer.add(r.offset), out.as_mut_ptr(), out.len());
             }
-            self.stream.synchronize()?;
-            let pointer = buffer.device_ptr()?.cast::<u8>();
-            ensure!(!pointer.is_null(), "null host readback pointer");
-            offset = 0;
-            for (_, out) in outputs.iter_mut() {
-                // HRX allocate_shared returns host-local, host-coherent storage;
-                // on the supported gfx1151 runtime its device pointer is also its
-                // host address (the same path HRX Readback::wait uses). Completion
-                // precedes host access; every copied byte was written above.
-                // The private readback allocation cannot alias caller outputs.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(pointer.add(offset), out.as_mut_ptr(), out.len());
-                }
-                offset += out.len();
-            }
-            Ok(())
-        })();
-        if result.is_err() {
-            self.failed = true;
         }
-        result
+        Ok(())
     }
 }
 

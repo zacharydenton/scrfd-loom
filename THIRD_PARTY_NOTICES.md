@@ -46,3 +46,11 @@ and obtaining any permission their use requires.
 [`t1.jpg`](https://github.com/deepinsight/insightface/blob/7fadd420c2351d0ffa8cac403421c1a3ed733365/python-package/insightface/data/images/t1.jpg).
 The accompanying JSON records the existing InsightFace reference results.
 These retain the InsightFace MIT attribution above. No model weights are included.
+
+## Hugging Face download source
+
+The optional automatic download uses [`immich-app/buffalo_l`](https://huggingface.co/immich-app/buffalo_l/tree/d09715916a0778919a770c343533641e250b8699),
+revision `d09715916a0778919a770c343533641e250b8699`, file `detection/model.onnx`.
+The validated file SHA-256 is `5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91`.
+These are the original model bytes; hosting them on Hugging Face does not change
+the model terms above. Weights are cached outside the Cargo package.

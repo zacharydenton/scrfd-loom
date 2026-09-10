@@ -15,21 +15,39 @@ pub(crate) struct Cnn {
     weights: HashMap<String, Region>,
 }
 impl Cnn {
-    pub fn new(plan: Plan, device: i32, max_batch: usize) -> Result<Self> {
+    pub fn new(mut plan: Plan, device: i32, max_batch: usize) -> Result<Self> {
         ensure!((1..=64).contains(&max_batch), "max_batch must be 1..=64");
         let mut engine = Engine::new(device)?;
         let mut weights = HashMap::new();
         for (name, data) in plan.weights {
             weights.insert(name, engine.weight(&data)?);
         }
-        let input = engine.allocate(max_batch * SIZE * SIZE * 3)?;
+        let input = engine.allocate_io(max_batch * SIZE * SIZE * 3)?;
+        // Keep terminal outputs separate from the device-local activation pool.
+        // The original liveness plan may reuse these slots for earlier layers.
+        for output in &mut plan.outputs {
+            let last = plan
+                .ops
+                .iter_mut()
+                .rfind(|op| op.dst_buf == *output)
+                .unwrap();
+            *output = plan.buffers.len();
+            plan.buffers.push(last.bytes);
+            last.dst_buf = *output;
+        }
         let buffers = plan
             .buffers
             .iter()
-            .map(|n| engine.allocate(n * max_batch))
+            .enumerate()
+            .map(|(i, n)| {
+                if plan.outputs.contains(&i) {
+                    engine.allocate_io(n * max_batch)
+                } else {
+                    engine.allocate(n * max_batch)
+                }
+            })
             .collect::<Result<Vec<_>>>()?;
         let outputs = plan.outputs.iter().map(|i| buffers[*i]).collect();
-        engine.reserve_readback(max_batch * (80 * 80 + 40 * 40 + 20 * 20) * 64 * 2)?;
         let specs = plan.ops.iter().map(specification).collect::<Vec<_>>();
         engine.compile(&specs)?;
         Ok(Self {
@@ -101,9 +119,10 @@ impl Cnn {
                     scalar: scalar as u32,
                     grid,
                     bindings,
+                    output: dst.buffer,
                 });
             }
-            self.engine.record(batch, &launches, None)?;
+            self.engine.record(batch, &launches)?;
         }
         self.engine.upload(self.input, input)?;
         self.engine.replay(batch)?;

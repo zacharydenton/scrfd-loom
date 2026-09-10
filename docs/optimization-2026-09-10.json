@@ -1,0 +1,305 @@
+{
+  "date": "2026-09-10",
+  "gpu": "Radeon 8060S gfx1151",
+  "hrx": "0.4.0",
+  "hrx_system_inspected_revision": "ecaaf7376f7dcaa599f6258b0d1c38ff7fbd0e3d",
+  "baseline_commit": "11a84f0",
+  "method": "Three paired rounds, reversing order each round; 10 warmups and 300 samples per executable. Timings are synchronized host wall-clock, not GPU timestamps. max_batch=16.",
+  "variants": {
+    "baseline": "shipped implementation",
+    "shared": "coherent input and separate terminal outputs; sequential graph",
+    "dependencies": "coherent I/O plus buffer hazard dependencies"
+  },
+  "final_trials": [
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 0,
+      "variant": "baseline",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.294768,
+          "p95_ms": 2.724717
+        },
+        "direct": {
+          "median_ms": 2.352837,
+          "p95_ms": 2.757497
+        }
+      },
+      "end_to_end": {
+        "median_ms": 3.683332,
+        "p95_ms": 6.506236,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 123.20229400000001
+      }
+    },
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 0,
+      "variant": "dependencies",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.228271,
+          "p95_ms": 2.25104
+        },
+        "direct": {
+          "median_ms": 2.348567,
+          "p95_ms": 2.370647
+        }
+      },
+      "end_to_end": {
+        "median_ms": 2.7545260000000003,
+        "p95_ms": 2.826694,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 121.64999499999999
+      }
+    },
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 1,
+      "variant": "dependencies",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.576661,
+          "p95_ms": 2.8499139999999996
+        },
+        "direct": {
+          "median_ms": 2.707687,
+          "p95_ms": 2.99744
+        }
+      },
+      "end_to_end": {
+        "median_ms": 2.993589,
+        "p95_ms": 3.9145450000000004,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 126.937794
+      }
+    },
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 1,
+      "variant": "baseline",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.340178,
+          "p95_ms": 2.379726
+        },
+        "direct": {
+          "median_ms": 2.369926,
+          "p95_ms": 2.4387749999999997
+        }
+      },
+      "end_to_end": {
+        "median_ms": 3.139256,
+        "p95_ms": 3.263493,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 123.657281
+      }
+    },
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 2,
+      "variant": "baseline",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.331427,
+          "p95_ms": 2.352518
+        },
+        "direct": {
+          "median_ms": 2.355117,
+          "p95_ms": 2.3847959999999997
+        }
+      },
+      "end_to_end": {
+        "median_ms": 3.145095,
+        "p95_ms": 3.250063,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 123.575323
+      }
+    },
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 2,
+      "variant": "dependencies",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.2400710000000004,
+          "p95_ms": 2.8376740000000003
+        },
+        "direct": {
+          "median_ms": 2.360977,
+          "p95_ms": 3.103387
+        }
+      },
+      "end_to_end": {
+        "median_ms": 2.735837,
+        "p95_ms": 2.928462,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 127.96516499999998
+      }
+    }
+  ],
+  "shared_only_trials": [
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 0,
+      "variant": "baseline",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.316598,
+          "p95_ms": 2.334148
+        },
+        "direct": {
+          "median_ms": 2.3392180000000002,
+          "p95_ms": 2.3556269999999997
+        }
+      },
+      "end_to_end": {
+        "median_ms": 3.084358,
+        "p95_ms": 3.129037,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 122.58667600000001
+      }
+    },
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 0,
+      "variant": "shared",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.332608,
+          "p95_ms": 2.352067
+        },
+        "direct": {
+          "median_ms": 2.354127,
+          "p95_ms": 2.3755260000000002
+        }
+      },
+      "end_to_end": {
+        "median_ms": 2.828504,
+        "p95_ms": 2.895333,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 126.71717599999998
+      }
+    },
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 1,
+      "variant": "shared",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.315518,
+          "p95_ms": 2.330847
+        },
+        "direct": {
+          "median_ms": 2.3367679999999997,
+          "p95_ms": 2.3555770000000003
+        }
+      },
+      "end_to_end": {
+        "median_ms": 2.827364,
+        "p95_ms": 3.00054,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 117.256488
+      }
+    },
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 1,
+      "variant": "baseline",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.3051690000000002,
+          "p95_ms": 2.477114
+        },
+        "direct": {
+          "median_ms": 2.327918,
+          "p95_ms": 2.513893
+        }
+      },
+      "end_to_end": {
+        "median_ms": 3.091097,
+        "p95_ms": 3.164266,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 134.917756
+      }
+    },
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 2,
+      "variant": "baseline",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.322838,
+          "p95_ms": 2.341697
+        },
+        "direct": {
+          "median_ms": 2.342678,
+          "p95_ms": 2.360827
+        }
+      },
+      "end_to_end": {
+        "median_ms": 3.0878680000000003,
+        "p95_ms": 3.153876,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 122.31630200000001
+      }
+    },
+    {
+      "model": "scrfd",
+      "batch": 1,
+      "round": 2,
+      "variant": "shared",
+      "forward": {
+        "samples": 300,
+        "graph": {
+          "median_ms": 2.310428,
+          "p95_ms": 2.327717
+        },
+        "direct": {
+          "median_ms": 2.3299879999999997,
+          "p95_ms": 2.351457
+        }
+      },
+      "end_to_end": {
+        "median_ms": 2.838114,
+        "p95_ms": 2.897873,
+        "samples": 300,
+        "scope": "warm end-to-end, including transfers",
+        "setup_ms": 123.493481
+      }
+    }
+  ]
+}

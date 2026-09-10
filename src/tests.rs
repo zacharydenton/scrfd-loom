@@ -39,9 +39,9 @@ fn preprocessing_and_detection_edges() {
     );
 }
 #[test]
-#[ignore = "requires SCRFD_MODEL; CPU model import"]
+#[ignore = "requires pretrained weights; CPU model import"]
 fn importer_liveness() -> Result<()> {
-    let p = model::load(std::path::Path::new(&std::env::var("SCRFD_MODEL")?))?;
+    let p = model::load(std::path::Path::new(&model_path()?))?;
     assert_eq!(p.ops.len(), 57);
     assert_eq!(p.buffers.len(), 5);
     for l in p.ops {
@@ -51,9 +51,9 @@ fn importer_liveness() -> Result<()> {
     Ok(())
 }
 #[test]
-#[ignore = "requires SCRFD_MODEL and gfx1151"]
+#[ignore = "requires pretrained weights and gfx1151"]
 fn native_reference_and_replay() -> Result<()> {
-    let path = std::env::var("SCRFD_MODEL")?;
+    let path = model_path()?;
     let mut model = Scrfd::load(
         &path,
         Options {
@@ -160,7 +160,7 @@ fn malformed_onnx_returns_errors() {
     assert!(onnx::Network::from_bytes(&model.write_to_bytes().unwrap(), 112).is_err());
 }
 #[test]
-#[ignore = "requires SCRFD_MODEL, bundled InsightFace fixture and gfx1151"]
+#[ignore = "requires pretrained weights and gfx1151"]
 fn insightface_fixture() -> Result<()> {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../tests/fixtures/t1_insightface.json"))?;
@@ -173,7 +173,7 @@ fn insightface_fixture() -> Result<()> {
         p.swap(0, 2);
     }
     let mut model = Scrfd::load(
-        std::env::var("SCRFD_MODEL")?,
+        model_path()?,
         Options {
             device: 0,
             max_batch: 2,
@@ -207,4 +207,11 @@ fn insightface_fixture() -> Result<()> {
         serde_json::to_value(&batched[1])?
     );
     Ok(())
+}
+
+fn model_path() -> Result<std::path::PathBuf> {
+    match std::env::var_os("SCRFD_MODEL") {
+        Some(path) => Ok(path.into()),
+        None => hub::weights(false),
+    }
 }
